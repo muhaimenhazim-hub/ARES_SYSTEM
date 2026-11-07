@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.db
+*.db-shm
+*.db-wal
+.env
+ares_user_config.json
