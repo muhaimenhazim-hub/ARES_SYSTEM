@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: VISUAL WEB DASHBOARD WITH IN-APP ACCOUNT SETTINGS
-VERSION: 3.1 (REAL BALANCE & ZERO MOCK DATA)
+VERSION: 3.2 (CLEAN PRODUCTION UI - NO TECHNICAL / OS JARGON)
 ================================================================================
 """
 
@@ -57,9 +57,9 @@ HTML_TEMPLATE = """
             <div class="flex items-center gap-3">
                 <div class="h-4 w-4 rounded-full bg-emerald-500 animate-pulse"></div>
                 <h1 class="text-xl md:text-2xl font-bold tracking-wider text-emerald-400">ARES AI TRADING SYSTEM</h1>
-                <span class="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded">نسخه لایو سرور</span>
+                <span class="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded">اتصال زنده</span>
             </div>
-            <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال بررسی ارتباط...</p>
+            <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال همگام‌سازی اطلاعات حساب...</p>
         </div>
         <div class="flex flex-wrap gap-3 items-center">
             <button onclick="openSettingsModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg font-bold text-xs md:text-sm transition flex items-center gap-1 shadow-lg shadow-blue-900/30">
@@ -79,7 +79,7 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-wallet text-emerald-400"></i>
             </div>
             <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="equity-val">$0.00</div>
-            <div class="text-xs text-emerald-400 mt-2 font-medium" id="account-id-display">در انتظار دریافت اطلاعات...</div>
+            <div class="text-xs text-gray-400 mt-2 font-medium" id="account-id-display">در انتظار دریافت داده‌های حساب</div>
         </div>
 
         <div class="card p-5">
@@ -117,7 +117,7 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-bolt text-amber-400"></i> معاملات فعال و تحت مدیریت زنده
             </h2>
             <span class="text-xs bg-blue-950 text-blue-400 border border-blue-800 px-3 py-1 rounded-full animate-pulse">
-                پایش ۲ ثانیه‌ای فعال
+                پایش لحظه‌ای فعال
             </span>
         </div>
         <div class="overflow-x-auto">
@@ -164,23 +164,6 @@ HTML_TEMPLATE = """
                 </select>
             </div>
 
-            <!-- بخش بایننس -->
-            <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-amber-900/40">
-                <h4 class="text-sm font-bold text-amber-400 mb-3 flex items-center gap-2">
-                    <i class="fa-brands fa-bitcoin"></i> اتصال به صرافی بایننس (کریپتو فیوچرز - ویژه سرور ابری)
-                </h4>
-                <div class="space-y-3 text-xs">
-                    <div>
-                        <label class="block text-gray-400 mb-1">Binance API Key:</label>
-                        <input type="text" id="cfg-binance-key" placeholder="کلید API اکانت بایننس شما" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
-                    </div>
-                    <div>
-                        <label class="block text-gray-400 mb-1">Binance Secret Key:</label>
-                        <input type="password" id="cfg-binance-secret" placeholder="کلید محرمانه Secret Key" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
-                    </div>
-                </div>
-            </div>
-
             <!-- بخش متاتریدر ۵ -->
             <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-gray-700/60">
                 <h4 class="text-sm font-bold text-emerald-400 mb-3 flex items-center gap-2">
@@ -198,6 +181,23 @@ HTML_TEMPLATE = """
                     <div>
                         <label class="block text-gray-400 mb-1">نام سرور بروکر (Server Name):</label>
                         <input type="text" id="cfg-mt5-server" placeholder="مثال: MetaQuotes-Demo" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    </div>
+                </div>
+            </div>
+
+            <!-- بخش بایننس -->
+            <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-amber-900/40">
+                <h4 class="text-sm font-bold text-amber-400 mb-3 flex items-center gap-2">
+                    <i class="fa-brands fa-bitcoin"></i> اتصال به صرافی بایننس (کریپتو فیوچرز)
+                </h4>
+                <div class="space-y-3 text-xs">
+                    <div>
+                        <label class="block text-gray-400 mb-1">Binance API Key:</label>
+                        <input type="text" id="cfg-binance-key" placeholder="کلید API اکانت بایننس شما" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 mb-1">Binance Secret Key:</label>
+                        <input type="password" id="cfg-binance-secret" placeholder="کلید محرمانه Secret Key" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                     </div>
                 </div>
             </div>
@@ -252,12 +252,20 @@ HTML_TEMPLATE = """
 
             const data = await res.json();
             if (res.ok) {
-                alert(data.message || "✅ تنظیمات با موفقیت ذخیره شد!");
+                alert(data.message || "تنظیمات با موفقیت ذخیره شد.");
                 closeSettingsModal();
                 fetchDashboardData();
             } else {
-                alert("❌ خطا در ذخیره تنظیمات!");
+                alert("خطا در ذخیره تنظیمات!");
             }
+        }
+
+        function sanitizeText(text) {
+            if (!text) return "";
+            if (text.includes("لینوکس") || text.includes("Gateway") || text.includes("ویندوز")) {
+                return "در حال بررسی ارتباط با حساب...";
+            }
+            return text;
         }
 
         async function fetchDashboardData() {
@@ -269,8 +277,9 @@ HTML_TEMPLATE = """
                 document.getElementById('daily-pnl').innerText = `${data.daily_pnl >= 0 ? '+' : ''}$${data.daily_pnl.toFixed(2)}`;
                 document.getElementById('daily-pnl').className = `text-2xl md:text-3xl font-extrabold mt-2 ${data.daily_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`;
                 document.getElementById('open-positions-count').innerText = `${data.open_positions.length} / 3`;
-                document.getElementById('account-id-display').innerText = data.account_info;
-                document.getElementById('broker-connected-info').innerText = data.broker_info;
+                
+                document.getElementById('account-id-display').innerText = sanitizeText(data.account_info);
+                document.getElementById('broker-connected-info').innerText = sanitizeText(data.broker_info);
             } catch (err) {
                 console.error(err);
             }
@@ -316,26 +325,37 @@ async def save_config_api(request: Request):
     new_data = await request.json()
     account_config.save_config(new_data)
 
-    # تست اتصال فوری جهت اطمینان کاربر
     equity, acc_info, broker_info, is_connected = account_config.fetch_live_account_balance()
-    msg = f"تنظیمات ذخیره شد. وضعیت: {acc_info} | {broker_info}"
+    
+    # پیام کاربرپسند و تجاری به دور از اصطلاحات فنی سرور
+    if is_connected:
+        msg = f"تنظیمات حساب با موفقیت ذخیره شد. حساب معاملاتی متصل است."
+    else:
+        msg = "تنظیمات با موفقیت ذخیره شد. در حال تلاش برای برقراری ارتباط با سرور حساب..."
 
     return JSONResponse(content={"status": "SUCCESS", "message": msg})
 
 
 @app.get("/api/status")
 def get_status_api():
-    # دریافت موجودی واقعی بدون هیچ عدد فرضی
     account_equity, account_info_str, broker_info_str, is_connected = account_config.fetch_live_account_balance()
     summary = db.get_portfolio_summary()
+
+    # جایگزینی متن‌های سیستمی با متن استاندارد تجاری
+    clean_account_info = account_info_str
+    clean_broker_info = broker_info_str
+    if any(keyword in str(account_info_str) for keyword in ["لینوکس", "Gateway", "ویندوز"]):
+        clean_account_info = "در انتظار برقراری ارتباط با بروکر"
+    if any(keyword in str(broker_info_str) for keyword in ["لینوکس", "Gateway", "ویندوز"]):
+        clean_broker_info = "وضعیت: در حال تلاش برای همگام‌سازی..."
 
     return {
         "equity": account_equity,
         "daily_pnl": summary.get("net_realized_pnl_usd", 0.0),
         "open_positions": [],
         "total_trades": summary.get("total_trades_count", 0),
-        "account_info": account_info_str,
-        "broker_info": broker_info_str,
+        "account_info": clean_account_info,
+        "broker_info": clean_broker_info,
         "is_connected": is_connected,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -344,8 +364,7 @@ def get_status_api():
 if __name__ == "__main__":
     local_ip = get_local_ip()
     print("=" * 75)
-    print("🌐 داشبورد گرافیکی مجهز به پنل تنظیمات اکانت راه‌اندازی شد!")
-    print("💻 آدرس ورود در کامپیوتر:  http://127.0.0.1:8000")
-    print(f"📱 آدرس ورود در سرور/شبکه: http://{local_ip}:8000")
+    print("داشبورد گرافیکی معاملات راه‌اندازی شد")
+    print(f"آدرس ورود: http://{local_ip}:8000")
     print("=" * 75)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")

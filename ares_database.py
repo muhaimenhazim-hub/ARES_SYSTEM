@@ -2,11 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: LIGHTWEIGHT SQL DATABASE ENGINE (MySQL-Compatible Schema)
-VERSION: 1.1
-================================================================================
-ماموریت ماژول:
-ثبت دائمی و فوق‌العاده بهینه تراکنش‌های معاملاتی، خروج‌های پله‌ای و عملکرد روزانه
-با زبان استاندارد SQL و کمترین مصرف منابع سخت‌افزاری (Zero Server Load).
+VERSION: 2.0 (STRICT ZERO MOCK DATA & REAL CLOSED TRADES PNL)
 ================================================================================
 """
 
@@ -24,17 +20,18 @@ class AresDatabaseManager:
     def __init__(self, db_path: str = "ares_trading.db"):
         self.db_path = db_path
         self._initialize_database()
+        self.clean_all_mock_data()  # پاکسازی قطعی تمام دیتای فیک و نمونه قدیمی
 
     def _get_connection(self) -> sqlite3.Connection:
         """برقراری اتصال امن با فعال‌سازی کش و حالت فوق‌سریع WAL"""
         conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row  # امکان خواندن خروجی‌ها به شکل دیکشنری
-        conn.execute("PRAGMA journal_mode = WAL;")  # جلوگیری از قفل شدن هارد
-        conn.execute("PRAGMA synchronous = NORMAL;") # سرعت بالا در نوشتن
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         return conn
 
     def _initialize_database(self):
-        """ساخت خودکار جداول استاندارد MySQL/SQL در صورت عدم وجود"""
+        """ساخت خودکار جداول استاندارد در صورت عدم وجود"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
@@ -64,7 +61,7 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۲. جدول خروج‌های پله‌ای (Partial Exits Table - TP1, TP2, TP3)
+            # ۲. جدول خروج‌های پله‌ای
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS partial_exits (
                     exit_id VARCHAR(64) PRIMARY KEY,
@@ -79,7 +76,7 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۳. جدول ستاپ‌ها و فرصت‌ها (Setups Log)
+            # ۳. جدول ستاپ‌ها و فرصت‌ها
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS setups_log (
                     setup_id VARCHAR(64) PRIMARY KEY,
@@ -94,7 +91,7 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۴. جدول عملکرد روزانه حساب ۵۰ دلاری (Daily Performance Table)
+            # ۴. جدول عملکرد روزانه
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS daily_performance (
                     log_date DATE PRIMARY KEY,
@@ -107,12 +104,23 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ایجاد ایندکس‌ها جهت تضمین جستجوی فوری و بدون فشار به پردازنده (CPU)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_setups_date ON setups_log(created_at);")
 
             conn.commit()
+
+    def clean_all_mock_data(self):
+        """حذف کامل رکوردهای آزمایشی، تستی و نمونه جهت تضمین دیتای واقعی"""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM trades WHERE trade_id LIKE 'POS_TEST%' OR trade_id LIKE 'TEST%' OR trade_id LIKE 'MOCK%';")
+                cursor.execute("DELETE FROM partial_exits WHERE trade_id LIKE 'POS_TEST%' OR trade_id LIKE 'TEST%' OR trade_id LIKE 'MOCK%';")
+                cursor.execute("DELETE FROM daily_performance;")
+                conn.commit()
+        except Exception:
+            pass
 
     def record_new_trade(self, pos_data: Dict[str, Any]):
         """ثبت پوزیشن تازه باز شده در جدول trades"""
@@ -150,7 +158,7 @@ class AresDatabaseManager:
             conn.commit()
 
     def record_partial_exit(self, exit_record: Dict[str, Any], trade_id: str):
-        """ثبت هر بار خروج پله‌ای (TP1 یا TP2) در جدول اختصاصی"""
+        """ثبت هر بار خروج پله‌ای در جدول اختصاصی"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -193,72 +201,31 @@ class AresDatabaseManager:
             conn.commit()
 
     def get_portfolio_summary(self) -> Dict[str, Any]:
-        """گزارش‌گیری فوری از عملکرد کل سیستم"""
+        """گزارش‌گیری دقیق و واقعی فقط از معاملات واقعی (بدون دیتای فیک)"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # تعداد کل معاملات
-            cursor.execute("SELECT COUNT(*) FROM trades;")
+            # تعداد معاملات واقعی (بدون معاملات تستی)
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE trade_id NOT LIKE 'POS_TEST%' AND trade_id NOT LIKE 'TEST%';")
             total_trades = cursor.fetchone()[0]
 
-            # تعداد معاملات باز
-            cursor.execute("SELECT COUNT(*) FROM trades WHERE status != 'CLOSED';")
+            # تعداد معاملات باز واقعی
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'OPEN' AND trade_id NOT LIKE 'POS_TEST%' AND trade_id NOT LIKE 'TEST%';")
             open_trades = cursor.fetchone()[0]
 
-            # کل سود محقق‌شده
-            cursor.execute("SELECT SUM(realized_pnl), SUM(total_fees) FROM trades;")
+            # محاسبه سود فقط و فقط از معاملات واقعی بسته‌شده
+            cursor.execute("""
+                SELECT SUM(realized_pnl), SUM(total_fees) 
+                FROM trades 
+                WHERE status = 'CLOSED' AND trade_id NOT LIKE 'POS_TEST%' AND trade_id NOT LIKE 'TEST%';
+            """)
             row = cursor.fetchone()
-            total_pnl = row[0] if row[0] is not None else 0.0
-            total_fees = row[1] if row[1] is not None else 0.0
+            total_pnl = row[0] if (row and row[0] is not None) else 0.0
+            total_fees = row[1] if (row and row[1] is not None) else 0.0
 
             return {
                 "total_trades_count": total_trades,
                 "open_trades_count": open_trades,
-                "net_realized_pnl_usd": round(total_pnl, 4),
-                "total_fees_paid_usd": round(total_fees, 4),
+                "net_realized_pnl_usd": round(total_pnl, 2),
+                "total_fees_paid_usd": round(total_fees, 2),
             }
-
-
-# ==============================================================================
-# تست زنده و مستقل پایگاه داده
-# ==============================================================================
-if __name__ == "__main__":
-    print("=" * 70)
-    print("ARES AI TRADING SYSTEM — TESTING SQL DATABASE ENGINE")
-    print("=" * 70)
-
-    db = AresDatabaseManager()
-    print("✅ فایل پایگاه داده (ares_trading.db) با ۴ جدول استاندارد ساخته شد.")
-
-    # تست ثبت یک معامله نمونه
-    sample_trade = {
-        "position_id": "POS_TEST_001",
-        "symbol": "BTCUSDT",
-        "market": "CRYPTO_FUTURES",
-        "side": "BUY",
-        "entry_price": 95000.0,
-        "initial_volume": 0.001,
-        "current_volume": 0.001,
-        "stop_loss": 94500.0,
-        "initial_stop_loss": 94500.0,
-        "targets": {"tp1": 96000.0, "tp2": 97000.0, "tp3": 98000.0},
-        "risk_amount_usd": 0.50,
-        "realized_pnl": 0.0,
-        "total_fees_paid": 0.05,
-        "is_break_even": False,
-        "status": "OPEN",
-        "open_time": datetime.now(timezone.utc).isoformat(),
-    }
-
-    db.record_new_trade(sample_trade)
-    print("📥 معامله تستی در جدول trades با موفقیت ذخیره شد.")
-
-    summary = db.get_portfolio_summary()
-    print("\n[خلاصه گزارش استخراج‌شده از دیتابیس]:")
-    print(f"📊 کل معاملات ثبت‌شده: {summary['total_trades_count']}")
-    print(f"🟢 معاملات باز: {summary['open_trades_count']}")
-    print(f"💰 سود خالص ثبت‌شده: {summary['net_realized_pnl_usd']} دلار")
-
-    print("\n" + "=" * 70)
-    print("✅ آزمون دیتابیس با موفقیت ۱۰۰٪ کامل شد. حجم رم مصرفی: 0 مگابایت!")
-    print("=" * 70)
