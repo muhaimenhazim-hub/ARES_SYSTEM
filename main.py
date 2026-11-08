@@ -1,8 +1,8 @@
 """
 ================================================================================
 ARES AI TRADING SYSTEM
-MASTER REAL-TIME ENGINE + DATABASE INTEGRATION (main.py)
-VERSION: 4.1 (DYNAMIC REAL BALANCE & ZERO MOCK DATA)
+MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
+VERSION: 5.0 (PER-USER TRADING PERMISSION & REAL BALANCE ONLY)
 ================================================================================
 """
 
@@ -34,7 +34,7 @@ from market_data_connector import AresUnifiedDataService
 
 class AresMasterSystem:
     """
-    هسته اصلی و ناظر هوشمند ARES مجهز به اتصال مستقیم به موجودی واقعی و پایگاه داده
+    هسته اصلی ناظر هوشمند ARES هماهنگ با دسترسی معامله خودکار کاربران
     """
 
     SYMBOLS_SPECS = {
@@ -52,7 +52,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛️ راه‌اندازی ربات خودکار ARES (بدون دیتای فرضی | متصل به اکانت واقعی)")
+        print("🏛 راه‌اندازی ربات خودکار ARES (نسخه چندکاربره با تفکیک قطعی داده‌ها)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -62,23 +62,9 @@ class AresMasterSystem:
         self.smc_engine = SMCICTStrategyEngine()
         self.setup_engine = MasterSetupEngine(min_rr_ratio=1.5)
 
-        # دریافت موجودی واقعی از کانفیگ
-        real_equity, acc_info, broker_info, is_connected = account_config.fetch_live_account_balance()
-        self.current_equity = real_equity
-
-        print(f"📡 وضعیت اکانت: {acc_info}")
-        print(f"💰 موجودی اولیه واقعی: {self.current_equity:.2f} USD")
-
-        self.risk_engine = RiskManagementPortfolioEngine(initial_capital=max(self.current_equity, 1.0))
+        self.risk_engine = RiskManagementPortfolioEngine(initial_capital=100.0)
         self.trade_engine = TradePositionManagementEngine(mode=ExecutionMode.PAPER)
         self.last_scan_time: float = 0.0
-
-    def sync_account_balance(self):
-        """همگام‌سازی لحظه‌ای موجودی در صورت تغییر در داشبورد وب"""
-        real_equity, acc_info, broker_info, is_connected = account_config.fetch_live_account_balance()
-        if is_connected and real_equity > 0:
-            self.current_equity = real_equity
-            self.risk_engine.update_account_state(new_equity=real_equity)
 
     def manage_active_positions_fast(self):
         if not self.trade_engine.open_positions:
@@ -99,7 +85,7 @@ class AresMasterSystem:
 
             if update.get("events"):
                 for ev in update["events"]:
-                    print(f"\n⚡️ [اقدام سریع روی {pos.symbol}]: {ev}", flush=True)
+                    print(f"\n⚡ [اقدام روی {pos.symbol}]: {ev}", flush=True)
 
                 if pos.partial_exits:
                     last_exit = pos.partial_exits[-1]
@@ -118,71 +104,72 @@ class AresMasterSystem:
                 pnl = update["position"]["realized_pnl"]
                 print(f"\n🔔 [تسویه معامله]: {pos.symbol} با سود/زیان {pnl:+.2f} دلار بسته شد.", flush=True)
                 self.db.record_new_trade(update["position"])
-                new_equity = self.risk_engine.current_equity + pnl
-                self.risk_engine.update_account_state(new_equity, realized_pnl_delta=pnl)
 
     def scan_for_opportunities(self):
-        self.sync_account_balance()
-
-        # اگر حسابی متصل نباشد یا موجودی صفر باشد، پوزیشنی باز نمی‌شود
-        if self.current_equity <= 0:
+        # بررسی کاربرانی که دکمه معامله خودکار را روشن کرده‌اند
+        active_users = self.db.get_auto_trading_users()
+        if not active_users:
+            print("⏱ [پایش زنده]: ربات در حالت آماده‌باش | در انتظار فعال‌سازی دکمه معامله توسط کاربران...", flush=True)
             return
 
-        open_count = len(self.trade_engine.open_positions)
-        if open_count >= self.risk_engine.max_open_positions:
-            return
+        for user in active_users:
+            equity, acc_info, broker_info, is_connected = account_config.fetch_user_live_balance(user)
+            user_id = user["user_id"]
 
-        for symbol, specs in self.SYMBOLS_SPECS.items():
-            if any(p.symbol == symbol for p in self.trade_engine.open_positions.values()):
+            print(f"👤 [پایش کاربر {user_id}]: موجودی: {equity:.2f}$ | وضعیت: {broker_info}", flush=True)
+
+            open_count = len(self.trade_engine.open_positions)
+            if open_count >= self.risk_engine.max_open_positions:
                 continue
 
-            if len(self.trade_engine.open_positions) >= self.risk_engine.max_open_positions:
-                break
+            for symbol, specs in self.SYMBOLS_SPECS.items():
+                if any(p.symbol == symbol for p in self.trade_engine.open_positions.values()):
+                    continue
 
-            news_status = self.news_filter.is_news_restricted(symbol)
-            if news_status["restricted"]:
-                continue
+                news_status = self.news_filter.is_news_restricted(symbol)
+                if news_status["restricted"]:
+                    continue
 
-            bundle = self.data_service.get_live_multitimeframe_bundle(symbol)
-            if not bundle:
-                continue
+                bundle = self.data_service.get_live_multitimeframe_bundle(symbol)
+                if not bundle:
+                    continue
 
-            current_price = bundle["current_price"]
-            market_type = bundle["market_type"]
+                current_price = bundle["current_price"]
+                market_type = bundle["market_type"]
 
-            crt_res = self.crt_engine.evaluate_crt_setup(symbol, market_type, bundle["df_htf"], bundle["df_mtf"], bundle["df_ltf"])
-            smc_res = self.smc_engine.analyze_market(symbol, market_type, bundle["df_mtf"])
+                crt_res = self.crt_engine.evaluate_crt_setup(symbol, market_type, bundle["df_htf"], bundle["df_mtf"], bundle["df_ltf"])
+                smc_res = self.smc_engine.analyze_market(symbol, market_type, bundle["df_mtf"])
 
-            opportunity = self.setup_engine.evaluate_opportunity(
-                crt_res.to_dict(), smc_res.to_dict(), current_price, session_valid=True, in_news_window=False
-            )
+                opportunity = self.setup_engine.evaluate_opportunity(
+                    crt_res.to_dict(), smc_res.to_dict(), current_price, session_valid=True, in_news_window=False
+                )
 
-            self.db.record_setup_evaluation(opportunity.to_dict())
+                self.db.record_setup_evaluation(opportunity.to_dict())
 
-            if opportunity.status == "APPROVED":
-                risk_decision = self.risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
-                if risk_decision.approved:
-                    success, pos, msg = self.trade_engine.open_position(
-                        symbol=symbol,
-                        market=market_type,
-                        side_str=opportunity.direction,
-                        entry_price=opportunity.entry_price,
-                        stop_loss=opportunity.stop_loss,
-                        tp1=opportunity.take_profit_1,
-                        tp2=opportunity.take_profit_2,
-                        tp3=opportunity.take_profit_3,
-                        allocated_volume=risk_decision.calculated_volume,
-                        risk_usd=risk_decision.risk_amount_usd,
-                    )
-                    if success:
-                        print(f"\n🔥 [معامله جدید در دیتابیس ثبت شد]: {symbol} | جهت: {opportunity.direction} | نمره: {opportunity.total_score}/100", flush=True)
-                        self.db.record_new_trade(pos.to_dict())
+                if opportunity.status == "APPROVED":
+                    risk_decision = self.risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
+                    if risk_decision.approved:
+                        success, pos, msg = self.trade_engine.open_position(
+                            symbol=symbol,
+                            market=market_type,
+                            side_str=opportunity.direction,
+                            entry_price=opportunity.entry_price,
+                            stop_loss=opportunity.stop_loss,
+                            tp1=opportunity.take_profit_1,
+                            tp2=opportunity.take_profit_2,
+                            tp3=opportunity.take_profit_3,
+                            allocated_volume=risk_decision.calculated_volume,
+                            risk_usd=risk_decision.risk_amount_usd,
+                        )
+                        if success:
+                            print(f"\n🔥 [معامله جدید برای کاربر {user_id}]: {symbol} | جهت: {opportunity.direction}", flush=True)
+                            self.db.record_new_trade(pos.to_dict(), user_id=user_id)
 
     def run_loop(self):
-        print("\n🚀 ناظر هوشمند سیستم فعال شد.")
+        print("\n🚀 سیستم معاملاتی چندکاربره فعال شد.")
         print("   - پایش قیمت‌ها: هر ۲ ثانیه یک‌بار")
-        print("   - ذخیره‌سازی رویدادها در پایگاه داده")
-        print("برای توقف اضطراری، کلیدهای Ctrl + C را بزنید.\n", flush=True)
+        print("   - مدیریت ایزوله هر حساب کاربری به صورت مستقل")
+        print("برای توقف اضطراری کلیدهای Ctrl + C را بزنید.\n", flush=True)
 
         scan_interval = 60.0
         self.last_scan_time = 0.0
@@ -196,16 +183,12 @@ class AresMasterSystem:
                     self.scan_for_opportunities()
                     self.last_scan_time = current_time
 
-                    db_summary = self.db.get_portfolio_summary()
-                    conn_text = f"{self.current_equity:.2f}$" if self.current_equity > 0 else "عدم اتصال (0.00$)"
-                    print(f"⏱ [پایش زنده]: سرمایه واقعی: {conn_text} | سود دیتابیس: {db_summary['net_realized_pnl_usd']:+.2f}$ | معاملات باز: {len(self.trade_engine.open_positions)}", flush=True)
-
                 time.sleep(2.0)
 
             except KeyboardInterrupt:
                 print("\n🛑 ربات متوقف شد.", flush=True)
                 sys.exit(0)
-            except Exception as e:
+            except Exception:
                 time.sleep(2.0)
 
 

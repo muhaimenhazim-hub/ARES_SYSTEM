@@ -1,11 +1,12 @@
 """
 ================================================================================
 ARES AI TRADING SYSTEM
-PHASE 5: LIGHTWEIGHT SQL DATABASE ENGINE (MySQL-Compatible Schema)
-VERSION: 2.0 (STRICT ZERO MOCK DATA & REAL CLOSED TRADES PNL)
+PHASE 5: MULTI-USER SQL DATABASE ENGINE
+VERSION: 3.0 (MULTI-TENANT USER AUTHENTICATION & ZERO MOCK DATA)
 ================================================================================
 """
 
+import hashlib
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -14,16 +15,15 @@ from typing import Any, Dict, List, Optional
 
 class AresDatabaseManager:
     """
-    مدیر پایگاه داده بهینه و سبک سیستم ARES
+    مدیر پایگاه داده چندکاربره سیستم ARES مجهز به احراز هویت و ایزوله‌سازی اکانت‌ها
     """
 
     def __init__(self, db_path: str = "ares_trading.db"):
         self.db_path = db_path
         self._initialize_database()
-        self.clean_all_mock_data()  # پاکسازی قطعی تمام دیتای فیک و نمونه قدیمی
+        self.clean_all_mock_data()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """برقراری اتصال امن با فعال‌سازی کش و حالت فوق‌سریع WAL"""
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
@@ -31,14 +31,40 @@ class AresDatabaseManager:
         return conn
 
     def _initialize_database(self):
-        """ساخت خودکار جداول استاندارد در صورت عدم وجود"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # ۱. جدول اصلی معاملات (Trades Table)
+            # جدول کاربران
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    identifier TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at DATETIME NOT NULL
+                );
+            """)
+
+            # جدول تنظیمات اختصاصی حساب هر کاربر
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_broker_configs (
+                    user_id TEXT PRIMARY KEY,
+                    trading_mode TEXT DEFAULT 'PAPER',
+                    binance_api_key TEXT DEFAULT '',
+                    binance_secret_key TEXT DEFAULT '',
+                    mt5_login TEXT DEFAULT '',
+                    mt5_pass TEXT DEFAULT '',
+                    mt5_server TEXT DEFAULT '',
+                    is_auto_trading INTEGER DEFAULT 0,
+                    updated_at DATETIME NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+            """)
+
+            # جدول معاملات
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     trade_id VARCHAR(64) PRIMARY KEY,
+                    user_id TEXT DEFAULT 'default',
                     symbol VARCHAR(20) NOT NULL,
                     market VARCHAR(30) NOT NULL,
                     side VARCHAR(10) NOT NULL,
@@ -61,7 +87,7 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۲. جدول خروج‌های پله‌ای
+            # جدول خروج‌های پله‌ای
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS partial_exits (
                     exit_id VARCHAR(64) PRIMARY KEY,
@@ -71,12 +97,11 @@ class AresDatabaseManager:
                     closed_volume REAL NOT NULL,
                     realized_pnl REAL NOT NULL,
                     fee_paid REAL NOT NULL,
-                    executed_at DATETIME NOT NULL,
-                    FOREIGN KEY (trade_id) REFERENCES trades(trade_id)
+                    executed_at DATETIME NOT NULL
                 );
             """)
 
-            # ۳. جدول ستاپ‌ها و فرصت‌ها
+            # جدول ثبت فرصت‌ها
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS setups_log (
                     setup_id VARCHAR(64) PRIMARY KEY,
@@ -91,50 +116,153 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۴. جدول عملکرد روزانه
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS daily_performance (
-                    log_date DATE PRIMARY KEY,
-                    ending_equity REAL NOT NULL,
-                    daily_realized_pnl REAL NOT NULL,
-                    total_trades INTEGER DEFAULT 0,
-                    winning_trades INTEGER DEFAULT 0,
-                    losing_trades INTEGER DEFAULT 0,
-                    drawdown_pct REAL DEFAULT 0.0
-                );
-            """)
-
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_setups_date ON setups_log(created_at);")
-
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_identifier ON users(identifier);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_user ON trades(user_id);")
             conn.commit()
 
+    @staticmethod
+    def _hash_pw(password: str) -> str:
+        return hashlib.sha256(password.strip().encode()).hexdigest()
+
+    def register_user(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
+        """ثبت‌نام کاربر جدید با شماره موبایل یا ایمیل"""
+        clean_id = identifier.strip().lower()
+        if not clean_id or len(password.strip()) < 4:
+            return None
+        user_id = f"usr_{hashlib.md5(clean_id.encode()).hexdigest()[:12]}"
+        pw_hash = self._hash_pw(password)
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO users (user_id, identifier, password_hash, created_at) VALUES (?, ?, ?, ?);",
+                    (user_id, clean_id, pw_hash, now),
+                )
+                conn.execute(
+                    "INSERT INTO user_broker_configs (user_id, updated_at) VALUES (?, ?);",
+                    (user_id, now),
+                )
+                conn.commit()
+                return {"user_id": user_id, "identifier": clean_id}
+        except sqlite3.IntegrityError:
+            return None
+
+    def authenticate_user(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
+        """ورود کاربر به سیستم"""
+        clean_id = identifier.strip().lower()
+        pw_hash = self._hash_pw(password)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_id, identifier FROM users WHERE identifier = ? AND password_hash = ?;",
+                (clean_id, pw_hash),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_user_broker_config(self, user_id: str) -> Dict[str, Any]:
+        """دریافت کانفیگ اختصاصی فقط برای کاربر مشخص‌شده"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM user_broker_configs WHERE user_id = ?;", (user_id,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return {
+                "user_id": user_id,
+                "trading_mode": "PAPER",
+                "binance_api_key": "",
+                "binance_secret_key": "",
+                "mt5_login": "",
+                "mt5_pass": "",
+                "mt5_server": "",
+                "is_auto_trading": 0,
+            }
+
+    def save_user_broker_config(self, user_id: str, cfg: Dict[str, Any]):
+        """ذخیره تنظیمات بروکر اختصاصی برای هر کاربر"""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO user_broker_configs (
+                    user_id, trading_mode, binance_api_key, binance_secret_key,
+                    mt5_login, mt5_pass, mt5_server, is_auto_trading, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    trading_mode = excluded.trading_mode,
+                    binance_api_key = excluded.binance_api_key,
+                    binance_secret_key = excluded.binance_secret_key,
+                    mt5_login = excluded.mt5_login,
+                    mt5_pass = excluded.mt5_pass,
+                    mt5_server = excluded.mt5_server,
+                    updated_at = excluded.updated_at;
+            """, (
+                user_id,
+                cfg.get("trading_mode", "PAPER"),
+                cfg.get("binance_api_key", "").strip(),
+                cfg.get("binance_secret_key", "").strip(),
+                str(cfg.get("mt5_login", "")).strip(),
+                str(cfg.get("mt5_pass", "")).strip(),
+                str(cfg.get("mt5_server", "")).strip(),
+                cfg.get("is_auto_trading", 0),
+                now,
+            ))
+            conn.commit()
+
+    def toggle_auto_trading(self, user_id: str) -> bool:
+        """فعال‌سازی یا توقف معامله خودکار برای اکانت کاربر"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT is_auto_trading FROM user_broker_configs WHERE user_id = ?;", (user_id,))
+            row = cursor.fetchone()
+            new_val = 1 if (not row or row[0] == 0) else 0
+            cursor.execute("UPDATE user_broker_configs SET is_auto_trading = ? WHERE user_id = ?;", (new_val, user_id))
+            conn.commit()
+            return bool(new_val)
+
+    def disconnect_broker(self, user_id: str):
+        """قطع ارتباط کامل حساب متاتریدر و صرافی برای کاربر جاری"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE user_broker_configs 
+                SET binance_api_key = '', binance_secret_key = '', mt5_login = '', mt5_pass = '', mt5_server = '', is_auto_trading = 0 
+                WHERE user_id = ?;
+            """, (user_id,))
+            conn.commit()
+
+    def get_auto_trading_users(self) -> List[Dict[str, Any]]:
+        """لیست کاربرانی که دکمه شروع معامله را روشن کرده‌اند"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM user_broker_configs WHERE is_auto_trading = 1;")
+            return [dict(r) for r in cursor.fetchall()]
+
     def clean_all_mock_data(self):
-        """حذف کامل رکوردهای آزمایشی، تستی و نمونه جهت تضمین دیتای واقعی"""
+        """تخلیه قطعی تمام دیتای فیک قدیمی"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM trades WHERE trade_id LIKE 'POS_TEST%' OR trade_id LIKE 'TEST%' OR trade_id LIKE 'MOCK%';")
-                cursor.execute("DELETE FROM partial_exits WHERE trade_id LIKE 'POS_TEST%' OR trade_id LIKE 'TEST%' OR trade_id LIKE 'MOCK%';")
-                cursor.execute("DELETE FROM daily_performance;")
+                cursor.execute("DELETE FROM partial_exits;")
                 conn.commit()
         except Exception:
             pass
 
-    def record_new_trade(self, pos_data: Dict[str, Any]):
-        """ثبت پوزیشن تازه باز شده در جدول trades"""
+    def record_new_trade(self, pos_data: Dict[str, Any], user_id: str = "default"):
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO trades (
-                    trade_id, symbol, market, side, entry_price, initial_volume,
+                    trade_id, user_id, symbol, market, side, entry_price, initial_volume,
                     current_volume, stop_loss, initial_stop_loss, tp1, tp2, tp3,
                     risk_amount_usd, realized_pnl, total_fees, is_break_even,
                     status, exit_reason, opened_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, (
                 pos_data["position_id"],
+                user_id,
                 pos_data["symbol"],
                 pos_data["market"],
                 pos_data["side"],
@@ -158,7 +286,6 @@ class AresDatabaseManager:
             conn.commit()
 
     def record_partial_exit(self, exit_record: Dict[str, Any], trade_id: str):
-        """ثبت هر بار خروج پله‌ای در جدول اختصاصی"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -179,7 +306,6 @@ class AresDatabaseManager:
             conn.commit()
 
     def record_setup_evaluation(self, opp_data: Dict[str, Any]):
-        """ثبت ستاپ کشف‌شده و نمره آن"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -200,26 +326,29 @@ class AresDatabaseManager:
             ))
             conn.commit()
 
-    def get_portfolio_summary(self) -> Dict[str, Any]:
-        """گزارش‌گیری دقیق و واقعی فقط از معاملات واقعی (بدون دیتای فیک)"""
+    def get_portfolio_summary(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """گزارش مالی تفکیک‌شده به ازای هر کاربر"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # تعداد معاملات واقعی (بدون معاملات تستی)
-            cursor.execute("SELECT COUNT(*) FROM trades WHERE trade_id NOT LIKE 'POS_TEST%' AND trade_id NOT LIKE 'TEST%';")
-            total_trades = cursor.fetchone()[0]
+            if user_id:
+                cursor.execute("SELECT COUNT(*) FROM trades WHERE user_id = ? AND trade_id NOT LIKE 'POS_TEST%';", (user_id,))
+                total_trades = cursor.fetchone()[0]
 
-            # تعداد معاملات باز واقعی
-            cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'OPEN' AND trade_id NOT LIKE 'POS_TEST%' AND trade_id NOT LIKE 'TEST%';")
-            open_trades = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM trades WHERE user_id = ? AND status = 'OPEN' AND trade_id NOT LIKE 'POS_TEST%';", (user_id,))
+                open_trades = cursor.fetchone()[0]
 
-            # محاسبه سود فقط و فقط از معاملات واقعی بسته‌شده
-            cursor.execute("""
-                SELECT SUM(realized_pnl), SUM(total_fees) 
-                FROM trades 
-                WHERE status = 'CLOSED' AND trade_id NOT LIKE 'POS_TEST%' AND trade_id NOT LIKE 'TEST%';
-            """)
-            row = cursor.fetchone()
+                cursor.execute("""
+                    SELECT SUM(realized_pnl), SUM(total_fees) 
+                    FROM trades 
+                    WHERE user_id = ? AND status = 'CLOSED' AND trade_id NOT LIKE 'POS_TEST%';
+                """, (user_id,))
+                row = cursor.fetchone()
+            else:
+                total_trades = 0
+                open_trades = 0
+                row = None
+
             total_pnl = row[0] if (row and row[0] is not None) else 0.0
             total_fees = row[1] if (row and row[1] is not None) else 0.0
 

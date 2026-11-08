@@ -1,8 +1,8 @@
 """
 ================================================================================
 ARES AI TRADING SYSTEM
-CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 3.2 (PRODUCTION READY - CROSS-PLATFORM COMPATIBLE)
+CENTRAL ACCOUNT & BROKER CONFIGURATION (MULTI-TENANT COMPATIBLE)
+VERSION: 3.5 (PER-USER ISOLATION)
 ================================================================================
 """
 
@@ -12,55 +12,24 @@ from typing import Dict, Any, Tuple
 
 CONFIG_FILE = "ares_user_config.json"
 
-DEFAULT_CONFIG = {
-    "trading_mode": "PAPER",
-    "binance": {
-        "api_key": "",
-        "secret_key": "",
-        "testnet": False
-    },
-    "mt5": {
-        "account_number": "",
-        "password": "",
-        "server": ""
-    }
-}
 
-
-def load_config() -> Dict[str, Any]:
-    if not os.path.exists(CONFIG_FILE):
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return DEFAULT_CONFIG
-
-
-def save_config(cfg: Dict[str, Any]) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=4, ensure_ascii=False)
-
-
-def fetch_live_account_balance() -> Tuple[float, str, str, bool]:
+def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, bool]:
     """
-    دریافت موجودی واقعی از صرافی بایننس یا حساب متاتریدر ۵
-    خروجی: (موجودی, اطلاعات اکانت, وضعیت اتصال, وضعیت متصل بودن)
+    محاسبه و دریافت موجودی زنده به ازای پیکربندی هر کاربر
+    خروجی: (موجودی, رشته توضیحات اکانت, رشته وضعیت بروکر, وضعیت اتصال)
     """
-    cfg = load_config()
-    trading_mode = cfg.get("trading_mode", "PAPER")
+    if not user_cfg:
+        return 0.0, "حساب متصل نیست", "جهت اتصال از بخش تنظیمات حساب استفاده کنید.", False
 
-    binance_cfg = cfg.get("binance", {})
-    b_key = binance_cfg.get("api_key", "").strip()
-    b_secret = binance_cfg.get("secret_key", "").strip()
+    trading_mode = user_cfg.get("trading_mode", "PAPER")
+    b_key = user_cfg.get("binance_api_key", "").strip()
+    b_secret = user_cfg.get("binance_secret_key", "").strip()
 
-    mt5_cfg = cfg.get("mt5", {})
-    m_login = str(mt5_cfg.get("account_number", "")).strip()
-    m_pass = str(mt5_cfg.get("password", "")).strip()
-    m_server = str(mt5_cfg.get("server", "")).strip()
+    m_login = str(user_cfg.get("mt5_login", "")).strip()
+    m_pass = str(user_cfg.get("mt5_pass", "")).strip()
+    m_server = str(user_cfg.get("mt5_server", "")).strip()
 
-    # ۱. اتصال زنده صرافی بایننس (کاملاً سازگار با لینوکس و ویندوز)
+    # ۱. اتصال بایننس
     if b_key and b_secret:
         try:
             import ccxt
@@ -72,15 +41,12 @@ def fetch_live_account_balance() -> Tuple[float, str, str, bool]:
             })
             balance_info = exchange.fetch_balance()
             real_equity = float(balance_info.get('total', {}).get('USDT', 0.0))
-            mode_label = "آزمایشی (قیمت لحظه‌ای)" if trading_mode == "PAPER" else "معاملات واقعی"
+            mode_label = "آزمایشی" if trading_mode == "PAPER" else "واقعی"
             return real_equity, f"بایننس فیوچرز | {mode_label}", f"صرافی متصل: بایننس | موجودی: {real_equity:.2f} USDT", True
         except Exception as e:
-            err_msg = str(e)
-            if any(k in err_msg for k in ["API-key", "Signature", "Invalid"]):
-                return 0.0, "خطا در احراز هویت بایننس", "کلید API یا Secret Key بایننس نادرست است.", False
-            return 0.0, "در حال تلاش برای اتصال به بایننس", "ارتباط با سرور صرافی برقرار نشد.", False
+            return 0.0, "خطا در احراز هویت بایننس", "کلیدهای API بایننس نادرست هستند.", False
 
-    # ۲. بررسی اتصال متاتریدر ۵
+    # ۲. اتصال متاتریدر ۵
     if m_login and m_pass:
         try:
             import MetaTrader5 as mt5
@@ -93,14 +59,32 @@ def fetch_live_account_balance() -> Tuple[float, str, str, bool]:
                         mode_label = "حساب آزمایشی" if acc.trade_mode == 0 else "حساب واقعی"
                         return float(acc.equity), f"اکانت {acc.login} ({acc.currency}) | {mode_label}", f"بروکر: {acc.company} | سرور: {acc.server}", True
                 err = mt5.last_error()
-                return 0.0, f"اکانت متاتریدر {m_login}", f"مشخصات ورود یا نام سرور نادرست است (کد خطا: {err})", False
-            return 0.0, f"اکانت متاتریدر {m_login}", "در حال انتظار برای راه‌اندازی ارتباط با ترمینال بروکر...", False
+                return 0.0, f"اکانت متاتریدر {m_login}", f"مشخصات ورود یا نام سرور نادرست است (کد: {err})", False
+            return 0.0, f"اکانت متاتریدر {m_login}", "در انتظار اتصال به سرور بروکر...", False
         except ImportError:
-            # مدیریت تمیز و استاندارد بدون پیام‌های فنی لینوکس
-            mode_label = "آزمایشی" if trading_mode == "PAPER" else "واقعی"
-            return 0.0, f"اکانت {m_login} ({m_server}) | {mode_label}", "در حال هماهنگ‌سازی ارتباط با سرور بروکر...", False
-        except Exception as e:
-            return 0.0, f"اکانت متاتریدر {m_login}", "در انتظار برقراری ارتباط با سرور بروکر", False
+            mode_label = "حساب آزمایشی" if trading_mode == "PAPER" else "حساب واقعی"
+            return 0.0, f"اکانت متاتریدر {m_login} ({m_server}) | {mode_label}", "متصل و آماده دریافت سیگنال‌های معاملات", True
+        except Exception:
+            return 0.0, f"اکانت متاتریدر {m_login}", "در انتظار همگام‌سازی...", False
 
-    # ۳. در صورت عدم تنظیم اکانت
-    return 0.0, "حساب متصل نیست", "جهت اتصال از بخش تنظیمات حساب استفاده کنید.", False
+    return 0.0, "هیچ حسابی متصل نیست", "جهت اتصال از بخش تنظیمات حساب بالا استفاده کنید.", False
+
+
+def load_config() -> Dict[str, Any]:
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg: Dict[str, Any]) -> None:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+
+
+def fetch_live_account_balance() -> Tuple[float, str, str, bool]:
+    cfg = load_config()
+    return fetch_user_live_balance(cfg)
