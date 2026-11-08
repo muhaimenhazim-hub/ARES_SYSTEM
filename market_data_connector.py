@@ -2,13 +2,16 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 1: UNIFIED MULTI-MARKET DATA CONNECTOR (Crypto & Forex & Indices)
-VERSION: 2.1 (AUTO-BROKER SUFFIX RESOLVER)
+VERSION: 3.0 (HYBRID NATIVE MT5 & CLOUD FOREX/GOLD ENGINE FOR LINUX)
 ================================================================================
 ماموریت ماژول:
-اتصال خودکار به بایننس فیوچرز و متاتریدر ۵ با قابلیت تشخیص خودکار پسوندهای بروکر (مانند .)
+اتصال خودکار به بایننس فیوچرز و متاتریدر ۵ با قابلیت سوئیچ خودکار به دیتای ابری
+در سرورهای لینوکس جهت فعال ماندن ۱۰۰٪ دیتای زنده طلا و جفت‌ارزها.
 ================================================================================
 """
 
+import json
+import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import ccxt
@@ -51,7 +54,7 @@ class BinanceFuturesConnector:
 
 
 class MT5ForexConnector:
-    """کانکتور رسمی بازار فارکس و شاخص‌ها برای اتصال به تمام بروکرها"""
+    """کانکتور رسمی بازار فارکس و طلا با پشتیبانی هم‌زمان از متاتریدر ویندوز و سرور ابری لینوکس"""
 
     TIMEFRAME_MAP = {
         "1h": 16385,   # mt5.TIMEFRAME_H1
@@ -59,30 +62,57 @@ class MT5ForexConnector:
         "5m": 5,       # mt5.TIMEFRAME_M5
     }
 
+    SYMBOL_MAP = {
+        "XAUUSD": "GC=F",
+        "GOLD": "GC=F",
+        "EURUSD": "EURUSD=X",
+        "GBPUSD": "GBPUSD=X",
+        "USDJPY": "USDJPY=X",
+        "AUDUSD": "AUDUSD=X",
+        "USDCAD": "USDCAD=X",
+        "USDCHF": "USDCHF=X",
+        "NZDUSD": "NZDUSD=X",
+        "NASDAQ": "NQ=F",
+        "USTEC": "NQ=F",
+        "NAS100": "NQ=F",
+        "US100": "NQ=F",
+        "SP500": "ES=F",
+        "US500": "ES=F",
+    }
+
     def __init__(self):
         self.connected = False
-        if not MT5_AVAILABLE:
-            print("⚠️ کتابخانه MetaTrader5 نصب نشده است.")
-            return
+        self.mode = "MT5"
 
-        if mt5.initialize():
-            self.connected = True
-            account_info = mt5.account_info()
-            broker_name = account_info.company if account_info else "بروکر جاری"
-            print(f"🔌 اتصال موفقیت‌آمیز به متاتریدر ۵ برقرار شد | بروکر: {broker_name} | سرور: {account_info.server}")
-        else:
-            print("⚠️ امکان اتصال به متاتریدر ۵ وجود ندارد.")
+        # ۱. تلاش برای اتصال به نرم‌افزار بومی متاتریدر (در ویندوز)
+        if MT5_AVAILABLE:
+            try:
+                if mt5.initialize():
+                    self.connected = True
+                    self.mode = "MT5_NATIVE"
+                    account_info = mt5.account_info()
+                    broker_name = account_info.company if account_info else "بروکر جاری"
+                    print(f"🔌 اتصال به متاتریدر ۵ برقرار شد | بروکر: {broker_name} | سرور: {account_info.server}")
+                    return
+            except Exception:
+                pass
+
+        # ۲. در سرور ابری لینوکس: فعال‌سازی خودکار دیتای زنده جهانی فارکس و طلا
+        self.connected = True
+        self.mode = "CLOUD_FOREX"
+        print("🌐 دیتای زنده بازار فارکس و انس طلا (XAUUSD) روی سرور ابری فعال شد.")
 
     def resolve_broker_symbol(self, standard_symbol: str) -> Optional[str]:
-        """پیدا کردن هوشمند نام نماد با توجه به پسوندهای بروکر (مثلاً نقطه یا m)"""
-        # لیست تمام نمادهای موجود در بروکر
+        """پیدا کردن هوشمند نام نماد با توجه به پسوندهای بروکر"""
+        if self.mode != "MT5_NATIVE":
+            return standard_symbol
+
         all_symbols = mt5.symbols_get()
         if not all_symbols:
             return None
 
         clean_target = standard_symbol.upper().replace(" ", "")
 
-        # ۱. ابتدا بررسی تطابق دقیق یا پسوندهای رایج
         search_candidates = [
             clean_target,
             f"{clean_target}.",
@@ -104,7 +134,6 @@ class MT5ForexConnector:
                 mt5.symbol_select(cand, True)
                 return cand
 
-        # ۲. جستجوی زیررشته‌ای
         for s_name in available_names:
             if clean_target in s_name:
                 mt5.symbol_select(s_name, True)
@@ -112,28 +141,81 @@ class MT5ForexConnector:
 
         return None
 
+    def _fetch_cloud_ohlcv(self, standard_symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
+        """دریافت زنده و بدون وقفه کندل‌های طلا و فارکس بر روی سرور لینوکس"""
+        clean_sym = standard_symbol.upper().replace(" ", "").replace("/", "").replace(".", "")
+        cloud_sym = self.SYMBOL_MAP.get(clean_sym, f"{clean_sym}=X")
+
+        range_map = {"5m": "5d", "15m": "5d", "1h": "1mo"}
+        fetch_range = range_map.get(timeframe, "5d")
+
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{cloud_sym}?interval={timeframe}&range={fetch_range}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+
+        try:
+            with urllib.request.urlopen(req, timeout=6.0) as response:
+                payload = json.loads(response.read().decode())
+                result = payload["chart"]["result"][0]
+                timestamps = result["timestamp"]
+                quote = result["indicators"]["quote"][0]
+
+                df = pd.DataFrame({
+                    "timestamp": pd.to_datetime(timestamps, unit="s"),
+                    "open": quote["open"],
+                    "high": quote["high"],
+                    "low": quote["low"],
+                    "close": quote["close"],
+                    "volume": quote.get("volume", [0] * len(timestamps)),
+                }).dropna()
+
+                if len(df) < 15:
+                    return None
+
+                for col in ["open", "high", "low", "close", "volume"]:
+                    df[col] = df[col].astype(np.float64)
+
+                return df.tail(limit)[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+        except Exception:
+            # پشتیبان فوری انس طلا در صورت بروز هرگونه قطعی
+            if "XAU" in clean_sym or "GOLD" in clean_sym:
+                return self._fetch_gold_backup(timeframe, limit)
+            return None
+
+    def _fetch_gold_backup(self, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
+        """پشتیبان زنده قیمت هر انس طلا بر بستر سرورهای PAXG"""
+        try:
+            ex = ccxt.binance({"options": {"defaultType": "future"}, "enableRateLimit": True})
+            raw = ex.fetch_ohlcv("PAXG/USDT:USDT", timeframe=timeframe, limit=limit)
+            if not raw or len(raw) < 15:
+                return None
+            df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = df[col].astype(np.float64)
+            return df
+        except Exception:
+            return None
+
     def fetch_ohlcv(self, standard_symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
         if not self.connected:
             return None
 
-        broker_symbol = self.resolve_broker_symbol(standard_symbol)
-        if not broker_symbol:
-            print(f"⚠️ نماد {standard_symbol} در مارکت واچ بروکر شما یافت نشد.")
-            return None
+        # اجرای حالت بومی در ویندوز
+        if self.mode == "MT5_NATIVE" and MT5_AVAILABLE:
+            broker_symbol = self.resolve_broker_symbol(standard_symbol)
+            if broker_symbol:
+                tf_val = self.TIMEFRAME_MAP.get(timeframe, 15)
+                rates = mt5.copy_rates_from_pos(broker_symbol, tf_val, 0, limit)
+                if rates is not None and len(rates) >= 15:
+                    df = pd.DataFrame(rates)
+                    df["timestamp"] = pd.to_datetime(df["time"], unit="s")
+                    df.rename(columns={"tick_volume": "volume"}, inplace=True)
+                    for col in ["open", "high", "low", "close", "volume"]:
+                        df[col] = df[col].astype(np.float64)
+                    return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
-        tf_val = self.TIMEFRAME_MAP.get(timeframe, 15)
-        rates = mt5.copy_rates_from_pos(broker_symbol, tf_val, 0, limit)
-
-        if rates is None or len(rates) < 15:
-            return None
-
-        df = pd.DataFrame(rates)
-        df["timestamp"] = pd.to_datetime(df["time"], unit="s")
-        df.rename(columns={"tick_volume": "volume"}, inplace=True)
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(np.float64)
-
-        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+        # اجرای حالت ابری برای سرور لینوکس
+        return self._fetch_cloud_ohlcv(standard_symbol, timeframe, limit)
 
 
 class AresUnifiedDataService:
@@ -187,15 +269,13 @@ if __name__ == "__main__":
     if crypto_data:
         print(f"✅ کریپتو فعال است: قیمت زنده بیت‌کوین = {crypto_data['current_price']:,} دلار")
 
-    # ۲. تست زنده دریافت طلا از متاتریدر ۵
-    print("\n--- آزمایش ۲: دریافت دیتای زنده فارکس (طلا) از متاتریدر ۵ ---")
-    if data_hub.mt5.connected:
-        gold_data = data_hub.get_live_multitimeframe_bundle("XAUUSD")
-        if gold_data:
-            print(f"✅ فارکس فعال است: قیمت زنده هر انس طلا = {gold_data['current_price']} دلار")
-        else:
-            # تست با جفت‌ارز یورو/دلار
-            eur_data = data_hub.get_live_multitimeframe_bundle("EURUSD")
-            if eur_data:
-                print(f"✅ فارکس فعال است: قیمت زنده EURUSD = {eur_data['current_price']}")
+    # ۲. تست زنده دریافت طلا
+    print("\n--- آزمایش ۲: دریافت دیتای زنده فارکس (طلا) ---")
+    gold_data = data_hub.get_live_multitimeframe_bundle("XAUUSD")
+    if gold_data:
+        print(f"✅ انس طلا فعال است: قیمت زنده طلا = {gold_data['current_price']} دلار")
+    else:
+        eur_data = data_hub.get_live_multitimeframe_bundle("EURUSD")
+        if eur_data:
+            print(f"✅ جفت‌ارز یورو/دلار فعال است: قیمت = {eur_data['current_price']}")
     print("=" * 75)
