@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: VISUAL WEB DASHBOARD WITH IN-APP ACCOUNT SETTINGS
-VERSION: 3.0
+VERSION: 3.1 (REAL BALANCE & ZERO MOCK DATA)
 ================================================================================
 """
 
@@ -17,12 +17,6 @@ import uvicorn
 import account_config
 from ares_database import AresDatabaseManager
 from ares_news_filter import EconomicNewsFilter
-
-try:
-    import MetaTrader5 as mt5
-    MT5_AVAILABLE = True
-except ImportError:
-    MT5_AVAILABLE = False
 
 app = FastAPI(title="ARES AI TRADING SYSTEM DASHBOARD")
 db = AresDatabaseManager()
@@ -63,12 +57,11 @@ HTML_TEMPLATE = """
             <div class="flex items-center gap-3">
                 <div class="h-4 w-4 rounded-full bg-emerald-500 animate-pulse"></div>
                 <h1 class="text-xl md:text-2xl font-bold tracking-wider text-emerald-400">ARES AI TRADING SYSTEM</h1>
-                <span class="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded">نسخه 1.1 لایو</span>
+                <span class="text-xs bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded">نسخه لایو سرور</span>
             </div>
             <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال بررسی ارتباط...</p>
         </div>
         <div class="flex flex-wrap gap-3 items-center">
-            <!-- دکمه تنظیمات حساب برای باز کردن مودال -->
             <button onclick="openSettingsModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg font-bold text-xs md:text-sm transition flex items-center gap-1 shadow-lg shadow-blue-900/30">
                 <i class="fa-solid fa-gear"></i> تنظیمات حساب و صرافی
             </button>
@@ -86,7 +79,7 @@ HTML_TEMPLATE = """
                 <i class="fa-solid fa-wallet text-emerald-400"></i>
             </div>
             <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="equity-val">$0.00</div>
-            <div class="text-xs text-emerald-400 mt-2 font-medium" id="account-id-display">حساب فعال: در حال دریافت...</div>
+            <div class="text-xs text-emerald-400 mt-2 font-medium" id="account-id-display">در انتظار دریافت اطلاعات...</div>
         </div>
 
         <div class="card p-5">
@@ -152,7 +145,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- پنجره تنظیمات حساب (Modal) برای اتصال اکانت‌ها از خود داشبورد -->
+    <!-- پنجره تنظیمات حساب (Modal) -->
     <div id="settings-modal" class="fixed inset-0 modal flex items-center justify-center p-4 hidden z-50">
         <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-xl w-full p-6 text-right max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center pb-3 border-b border-gray-800">
@@ -166,46 +159,45 @@ HTML_TEMPLATE = """
             <div class="mt-4">
                 <label class="block text-xs font-bold text-gray-400 mb-1">حالت معامله:</label>
                 <select id="cfg-trading-mode" class="w-full bg-gray-800 border border-gray-700 rounded-lg p-2.5 text-sm text-white focus:outline-none focus:border-blue-500">
-                    <option value="PAPER">آزمایشی زنده روی قیمت‌های واقعی (Paper Trading)</option>
+                    <option value="PAPER">آزمایشی روی قیمت‌های واقعی بازار (Paper Trading)</option>
                     <option value="LIVE">معاملات واقعی با سرمایه حقیقی (Live Trading)</option>
                 </select>
             </div>
 
+            <!-- بخش بایننس -->
+            <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-amber-900/40">
+                <h4 class="text-sm font-bold text-amber-400 mb-3 flex items-center gap-2">
+                    <i class="fa-brands fa-bitcoin"></i> اتصال به صرافی بایننس (کریپتو فیوچرز - ویژه سرور ابری)
+                </h4>
+                <div class="space-y-3 text-xs">
+                    <div>
+                        <label class="block text-gray-400 mb-1">Binance API Key:</label>
+                        <input type="text" id="cfg-binance-key" placeholder="کلید API اکانت بایننس شما" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-gray-400 mb-1">Binance Secret Key:</label>
+                        <input type="password" id="cfg-binance-secret" placeholder="کلید محرمانه Secret Key" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    </div>
+                </div>
+            </div>
+
             <!-- بخش متاتریدر ۵ -->
-            <div class="mt-6 p-4 rounded-lg bg-gray-800/40 border border-gray-700/60">
+            <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-gray-700/60">
                 <h4 class="text-sm font-bold text-emerald-400 mb-3 flex items-center gap-2">
                     <i class="fa-solid fa-chart-line"></i> اتصال به متاتریدر ۵ (فارکس و طلا)
                 </h4>
                 <div class="space-y-3 text-xs">
                     <div>
                         <label class="block text-gray-400 mb-1">شماره حساب (Login Number):</label>
-                        <input type="text" id="cfg-mt5-login" placeholder="مثال: 300112" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white">
+                        <input type="text" id="cfg-mt5-login" placeholder="مثال: 115293699" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                     </div>
                     <div>
                         <label class="block text-gray-400 mb-1">رمز عبور حساب (Password):</label>
-                        <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور اکانت متاتریدر" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white">
+                        <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور اکانت متاتریدر" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                     </div>
                     <div>
                         <label class="block text-gray-400 mb-1">نام سرور بروکر (Server Name):</label>
-                        <input type="text" id="cfg-mt5-server" placeholder="مثال: AronMarkets-Demo یا Alpari-Standard" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white">
-                    </div>
-                    <p class="text-[11px] text-gray-500">* اگر فیلدهای متاتریدر خالی بمانند، ربات خودکار به اکانتی که هم‌اکنون داخل نرم‌افزار MT5 باز است متصل می‌ماند.</p>
-                </div>
-            </div>
-
-            <!-- بخش بایننس -->
-            <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-gray-700/60">
-                <h4 class="text-sm font-bold text-amber-400 mb-3 flex items-center gap-2">
-                    <i class="fa-brands fa-bitcoin"></i> اتصال به صرافی بایننس (کریپتو فیوچرز)
-                </h4>
-                <div class="space-y-3 text-xs">
-                    <div>
-                        <label class="block text-gray-400 mb-1">Binance API Key:</label>
-                        <input type="text" id="cfg-binance-key" placeholder="کلید API اکانت بایننس شما" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white">
-                    </div>
-                    <div>
-                        <label class="block text-gray-400 mb-1">Binance Secret Key:</label>
-                        <input type="password" id="cfg-binance-secret" placeholder="کلید محرمانه Secret Key" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white">
+                        <input type="text" id="cfg-mt5-server" placeholder="مثال: MetaQuotes-Demo" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                     </div>
                 </div>
             </div>
@@ -258,8 +250,9 @@ HTML_TEMPLATE = """
                 body: JSON.stringify(payload)
             });
 
+            const data = await res.json();
             if (res.ok) {
-                alert("✅ اطلاعات حساب با موفقیت ذخیره و به سیستم اعمال شد!");
+                alert(data.message || "✅ تنظیمات با موفقیت ذخیره شد!");
                 closeSettingsModal();
                 fetchDashboardData();
             } else {
@@ -305,7 +298,6 @@ def get_dashboard_html():
 @app.get("/api/config")
 def get_config_api():
     cfg = account_config.load_config()
-    # عدم ارسال پسوردهای حساس به فرانت
     safe_cfg = {
         "trading_mode": cfg.get("trading_mode", "PAPER"),
         "mt5": {
@@ -324,48 +316,27 @@ async def save_config_api(request: Request):
     new_data = await request.json()
     account_config.save_config(new_data)
 
-    # اتصال مجدد به متاتریدر در صورت ثبت لاگین جدید
-    mt5_data = new_data.get("mt5", {})
-    if MT5_AVAILABLE and mt5_data.get("account_number") and mt5_data.get("password"):
-        try:
-            mt5.initialize()
-            mt5.login(
-                login=int(mt5_data["account_number"]),
-                password=mt5_data["password"],
-                server=mt5_data.get("server")
-            )
-        except Exception:
-            pass
+    # تست اتصال فوری جهت اطمینان کاربر
+    equity, acc_info, broker_info, is_connected = account_config.fetch_live_account_balance()
+    msg = f"تنظیمات ذخیره شد. وضعیت: {acc_info} | {broker_info}"
 
-    return JSONResponse(content={"status": "SUCCESS"})
+    return JSONResponse(content={"status": "SUCCESS", "message": msg})
 
 
 @app.get("/api/status")
 def get_status_api():
-    account_equity = 50.0
-    account_info_str = "حساب دمو"
-    broker_info_str = "متاتریدر ۵ فعال است"
-
-    if MT5_AVAILABLE:
-        try:
-            if mt5.initialize():
-                acc = mt5.account_info()
-                if acc:
-                    account_equity = float(acc.equity)
-                    account_info_str = f"اکانت {acc.login} ({acc.currency})"
-                    broker_info_str = f"بروکر متصل: {acc.company} | سرور: {acc.server}"
-        except Exception:
-            pass
-
+    # دریافت موجودی واقعی بدون هیچ عدد فرضی
+    account_equity, account_info_str, broker_info_str, is_connected = account_config.fetch_live_account_balance()
     summary = db.get_portfolio_summary()
 
     return {
         "equity": account_equity,
-        "daily_pnl": summary["net_realized_pnl_usd"],
+        "daily_pnl": summary.get("net_realized_pnl_usd", 0.0),
         "open_positions": [],
-        "total_trades": summary["total_trades_count"],
+        "total_trades": summary.get("total_trades_count", 0),
         "account_info": account_info_str,
         "broker_info": broker_info_str,
+        "is_connected": is_connected,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -375,6 +346,6 @@ if __name__ == "__main__":
     print("=" * 75)
     print("🌐 داشبورد گرافیکی مجهز به پنل تنظیمات اکانت راه‌اندازی شد!")
     print("💻 آدرس ورود در کامپیوتر:  http://127.0.0.1:8000")
-    print(f"📱 آدرس ورود در گوشی موبایل: http://{local_ip}:8000")
+    print(f"📱 آدرس ورود در سرور/شبکه: http://{local_ip}:8000")
     print("=" * 75)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
