@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 5.0 (CLOUD METAAPI & BINANCE COMPATIBLE)
+VERSION: 6.0 (STRICT VALIDATION & ZERO PHANTOM METRICS)
 ================================================================================
 """
 
@@ -50,7 +50,7 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-4 md:p-6 min-h-screen flex flex-col justify-between">
 
-    <!-- صفحه ورود و ثبت نام اختصاصی -->
+    <!-- صفحه ورود و ثبت نام -->
     <div id="auth-container" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b0e14]">
         <div class="card max-w-md w-full p-6 md:p-8 text-right border-gray-800 shadow-2xl">
             <div class="text-center mb-6">
@@ -61,7 +61,6 @@ HTML_TEMPLATE = """
                 <p class="text-xs text-gray-400 mt-1">سامانه اختصاصی مدیریت معاملات هوشمند</p>
             </div>
 
-            <!-- تب های ورود / ثبت نام -->
             <div class="flex border-b border-gray-800 mb-6">
                 <button id="tab-login-btn" onclick="switchAuthTab('login')" class="flex-1 pb-3 text-sm font-bold text-emerald-400 border-b-2 border-emerald-400 transition">ورود به حساب</button>
                 <button id="tab-register-btn" onclick="switchAuthTab('register')" class="flex-1 pb-3 text-sm font-bold text-gray-500 transition">ثبت‌نام کاربر جدید</button>
@@ -70,11 +69,11 @@ HTML_TEMPLATE = """
             <div class="space-y-4 text-xs md:text-sm">
                 <div>
                     <label class="block text-gray-400 mb-1">ایمیل یا شماره موبایل:</label>
-                    <input type="text" id="auth-identifier" placeholder="مثال: user@gmail.com" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
+                    <input type="text" id="auth-identifier" placeholder="ایمیل یا موبایل خود را بنویسید" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
                 </div>
                 <div>
                     <label class="block text-gray-400 mb-1">کلمه عبور:</label>
-                    <input type="password" id="auth-password" placeholder="حداقل ۴ کاراکتر" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
+                    <input type="password" id="auth-password" placeholder="کلمه عبور" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
                 </div>
                 <button id="auth-submit-btn" onclick="handleAuthSubmit()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition shadow-lg shadow-emerald-950/40">
                     ورود به پنل کاربری
@@ -93,7 +92,7 @@ HTML_TEMPLATE = """
                     <h1 class="text-xl md:text-2xl font-bold tracking-wider text-emerald-400">ARES AI TRADING SYSTEM</h1>
                     <span id="user-display-badge" class="text-xs bg-gray-800 text-gray-300 border border-gray-700 px-3 py-1 rounded-full font-mono">کاربر: ...</span>
                 </div>
-                <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال پایش اطلاعات حساب ابری...</p>
+                <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال بررسی حساب...</p>
             </div>
             
             <div class="flex flex-wrap gap-2 items-center">
@@ -131,8 +130,8 @@ HTML_TEMPLATE = """
                     <span>سود محقق‌شده معاملات</span>
                     <i class="fa-solid fa-chart-line text-blue-400"></i>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="daily-pnl">+$0.00</div>
-                <div class="text-xs text-gray-400 mt-2">محاسبه بر اساس معاملات بسته شده شما</div>
+                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="daily-pnl">$0.00</div>
+                <div class="text-xs text-gray-400 mt-2">معاملات بسته شده حساب متصل</div>
             </div>
 
             <div class="card p-5">
@@ -183,7 +182,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- مودال تنظیمات -->
+    <!-- مودال تنظیمات با اعتبارسنجی دقیق -->
     <div id="settings-modal" class="fixed inset-0 modal flex items-center justify-center p-4 hidden z-50">
         <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-xl w-full p-6 text-right max-h-[90vh] overflow-y-auto shadow-2xl">
             <div class="flex justify-between items-center pb-3 border-b border-gray-800">
@@ -205,15 +204,15 @@ HTML_TEMPLATE = """
             <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-gray-700/60 space-y-2.5 text-xs">
                 <h4 class="font-bold text-emerald-400 flex items-center gap-1.5"><i class="fa-solid fa-chart-line"></i> متاتریدر ۵ (فارکس و انس طلا)</h4>
                 <div>
-                    <label class="block text-gray-400 mb-1">شماره حساب (Login Number):</label>
-                    <input type="text" id="cfg-mt5-login" placeholder="مثال: 115293699" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    <label class="block text-gray-400 mb-1">شماره حساب دقیق متاتریدر (Login):</label>
+                    <input type="text" id="cfg-mt5-login" placeholder="شماره حساب عددی خود را تایپ کنید" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                 </div>
                 <div>
                     <label class="block text-gray-400 mb-1">رمز عبور حساب (Password):</label>
-                    <input type="password" id="cfg-mt5-pass" placeholder="Password" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور حساب" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                 </div>
                 <div>
-                    <label class="block text-gray-400 mb-1">نام سرور بروکر (Server Name):</label>
+                    <label class="block text-gray-400 mb-1">نام دقیق سرور بروکر (Server Name):</label>
                     <input type="text" id="cfg-mt5-server" placeholder="مثال: MetaQuotes-Demo" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                 </div>
             </div>
@@ -320,10 +319,15 @@ HTML_TEMPLATE = """
                     return;
                 }
                 const data = await res.json();
-                document.getElementById('equity-val').innerText = `$${data.equity.toFixed(2)}`;
-                document.getElementById('daily-pnl').innerText = `${data.daily_pnl >= 0 ? '+' : ''}$${data.daily_pnl.toFixed(2)}`;
-                document.getElementById('daily-pnl').className = `text-2xl md:text-3xl font-extrabold mt-2 ${data.daily_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`;
-                document.getElementById('open-positions-count').innerText = `${data.open_positions_count} / 3`;
+                document.getElementById('equity-val').innerText = `$${data.equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                
+                // در صورت عدم اتصال حساب، سود صفر نمایش داده می‌شود تا دیتای فرضی نباشد
+                const pnl = data.is_connected ? data.daily_pnl : 0.0;
+                document.getElementById('daily-pnl').innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+                document.getElementById('daily-pnl').className = `text-2xl md:text-3xl font-extrabold mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`;
+                
+                const openCount = data.is_connected ? data.open_positions_count : 0;
+                document.getElementById('open-positions-count').innerText = `${openCount} / 3`;
                 document.getElementById('account-id-display').innerText = data.account_info;
                 document.getElementById('broker-connected-info').innerText = data.broker_info;
 
@@ -385,13 +389,24 @@ HTML_TEMPLATE = """
 
         async function saveAccountSettings() {
             if (!currentUser) return;
+            const loginVal = document.getElementById('cfg-mt5-login').value.trim();
+            const passVal = document.getElementById('cfg-mt5-pass').value.trim();
+            const serverVal = document.getElementById('cfg-mt5-server').value.trim();
+            const binanceKey = document.getElementById('cfg-binance-key').value.trim();
+            const binanceSec = document.getElementById('cfg-binance-secret').value.trim();
+
+            if (!binanceKey && (!loginVal || !passVal || !serverVal)) {
+                alert("لطفاً شماره حساب متاتریدر، رمز عبور و نام سرور را به صورت کامل تایپ کنید.");
+                return;
+            }
+
             const payload = {
                 trading_mode: document.getElementById('cfg-trading-mode').value,
-                mt5_login: document.getElementById('cfg-mt5-login').value,
-                mt5_pass: document.getElementById('cfg-mt5-pass').value,
-                mt5_server: document.getElementById('cfg-mt5-server').value,
-                binance_api_key: document.getElementById('cfg-binance-key').value,
-                binance_secret_key: document.getElementById('cfg-binance-secret').value,
+                mt5_login: loginVal,
+                mt5_pass: passVal,
+                mt5_server: serverVal,
+                binance_api_key: binanceKey,
+                binance_secret_key: binanceSec,
             };
 
             const res = await fetch('/api/user/config', {
@@ -405,7 +420,7 @@ HTML_TEMPLATE = """
 
             const data = await res.json();
             if (res.ok) {
-                alert(data.message);
+                alert("اطلاعات ثبت شد. در حال استقرار و خواندن موجودی از سرور بروکر...");
                 closeSettingsModal();
                 fetchUserStatus();
             } else {
@@ -459,17 +474,13 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
 
     user_cfg = db.get_user_broker_config(x_user_id)
-    try:
-        equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
-    except Exception:
-        equity, acc_info, broker_info, is_conn = 0.0, "در حال همگام‌سازی", "برقراری ارتباط ابری...", False
-
+    equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
     summary = db.get_portfolio_summary(user_id=x_user_id)
 
     return {
         "equity": equity,
-        "daily_pnl": summary.get("net_realized_pnl_usd", 0.0),
-        "open_positions_count": summary.get("open_trades_count", 0),
+        "daily_pnl": summary.get("net_realized_pnl_usd", 0.0) if is_conn else 0.0,
+        "open_positions_count": summary.get("open_trades_count", 0) if is_conn else 0,
         "account_info": acc_info,
         "broker_info": broker_info,
         "is_connected": is_conn,

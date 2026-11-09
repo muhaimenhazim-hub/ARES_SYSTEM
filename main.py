@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 6.0 (TRUE MULTI-TENANT ISOLATION & CLOUD ENGINE READY)
+VERSION: 7.0 (STRICT ZERO-MOCK & REAL-ACCOUNT CONNECTION ENFORCEMENT)
 ================================================================================
 """
 
@@ -34,7 +34,7 @@ from market_data_connector import AresUnifiedDataService
 
 class AresMasterSystem:
     """
-    هسته اصلی ناظر هوشمند ARES با ایزوله‌سازی ۱۰۰٪ چندکاربره
+    هسته اصلی ناظر هوشمند ARES - بدون دیتای فرضی و مشروط به اتصال واقعی حساب
     """
 
     SYMBOLS_SPECS = {
@@ -52,10 +52,13 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات خودکار ARES (نسخه چندکاربره با تفکیک قطعی داده‌ها)")
+        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه بدون دیتای فرضی - متصل به متاتریدر و بایننس)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
+        # پاکسازی خودکار دیتای تست قبلی در شروع به کار
+        self.db.clean_all_mock_data()
+
         self.data_service = AresUnifiedDataService()
         self.news_filter = EconomicNewsFilter(blackout_window_minutes=30)
         self.crt_engine = CRTStrategyEngine()
@@ -67,7 +70,7 @@ class AresMasterSystem:
         self.last_scan_time: float = 0.0
 
     def manage_active_positions_fast(self):
-        """مدیریت آنی تمام پوزیشن‌های باز کاربران (تیک به تیک)"""
+        """مدیریت پوزیشن‌های فعال کاربران به صورت زنده"""
         if not self.trade_engine.open_positions:
             return
 
@@ -103,32 +106,32 @@ class AresMasterSystem:
 
             if update.get("status") == "CLOSED":
                 pnl = update["position"]["realized_pnl"]
-                print(f"\n🔔 [تسویه معامله برای کاربر {pos.user_id}]: {pos.symbol} با سود/زیان {pnl:+.2f} دلار بسته شد.", flush=True)
+                print(f"\n🔔 [تسویه معامله]: {pos.symbol} با سود/زیان {pnl:+.2f} دلار بسته شد.", flush=True)
                 self.db.record_new_trade(update["position"], user_id=pos.user_id)
 
     def scan_for_opportunities(self):
-        """اسکن بازار به ازای کاربرانی که معامله خودکار را روشن کرده‌اند"""
+        """اسکن بازار فقط برای کاربرانی که اکانتشان متصل است و دکمه را فعال کرده‌اند"""
         active_users = self.db.get_auto_trading_users()
         if not active_users:
-            print("⏱ [پایش زنده]: ربات در حالت آماده‌باش | در انتظار فعال‌سازی معامله توسط کاربران...", flush=True)
+            print("⏱ [پایش زنده]: در انتظار اتصال حساب واقعی و فعال‌سازی توسط کاربران...", flush=True)
             return
 
         for user in active_users:
             user_id = user["user_id"]
             equity, acc_info, broker_info, is_connected = account_config.fetch_user_live_balance(user)
 
-            # اگر بالانس صفر بود یا اکانت تستی بود، بالانس پیش‌فرض تخصیص می‌یابد
-            effective_capital = equity if equity > 10.0 else 1000.0
+            # اصل حیاتی: اگر حساب متصل نباشد یا موجودی صفر باشد، ابداً معامله‌ای انجام نمی‌شود
+            if not is_connected or equity <= 0:
+                print(f"⏸ [کاربر {user_id}]: حساب متصل نیست یا موجودی صفر است. هیچ معامله‌ای انجام نمی‌شود. ({broker_info})", flush=True)
+                continue
 
-            print(f"👤 [پایش کاربر {user_id}]: موجودی: {equity:.2f}$ | وضعیت: {broker_info}", flush=True)
+            print(f"👤 [کاربر {user_id} متصل شد]: موجودی واقعی: ${equity:,.2f} | وضعیت: {broker_info}", flush=True)
 
-            # بررسی سقف ۳ پوزیشن به صورت اختصاصی برای همین کاربر
             user_open_count = sum(1 for p in self.trade_engine.open_positions.values() if p.user_id == user_id)
             if user_open_count >= self.risk_engine.max_open_positions:
                 continue
 
             for symbol, specs in self.SYMBOLS_SPECS.items():
-                # جلوگیری از ورود چندگانه کاربر روی یک نماد
                 if any(p.symbol == symbol and p.user_id == user_id for p in self.trade_engine.open_positions.values()):
                     continue
 
@@ -153,8 +156,7 @@ class AresMasterSystem:
                 self.db.record_setup_evaluation(opportunity.to_dict())
 
                 if opportunity.status == "APPROVED":
-                    # تنظیم پویای ریسک بر اساس بالانس کاربر
-                    self.risk_engine.current_capital = effective_capital
+                    self.risk_engine.current_capital = equity
                     risk_decision = self.risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
 
                     if risk_decision.approved:
@@ -172,15 +174,11 @@ class AresMasterSystem:
                             user_id=user_id,
                         )
                         if success:
-                            print(f"\n🔥 [معامله جدید برای کاربر {user_id}]: {symbol} | جهت: {opportunity.direction} | حجم: {risk_decision.calculated_volume}", flush=True)
+                            print(f"\n🔥 [معامله واقعی ثبت شد]: {symbol} برای کاربر {user_id} | حجم: {risk_decision.calculated_volume}", flush=True)
                             self.db.record_new_trade(pos.to_dict(), user_id=user_id)
 
     def run_loop(self):
-        print("\n🚀 سیستم معاملاتی چندکاربره فعال شد.")
-        print("   - پایش قیمت‌ها: هر ۲ ثانیه یک‌بار")
-        print("   - مدیریت ایزوله هر حساب کاربری به صورت مستقل")
-        print("برای توقف اضطراری کلیدهای Ctrl + C را بزنید.\n", flush=True)
-
+        print("\n🚀 سیستم پایش و معاملات بدون دیتای فرضی فعال شد.\n", flush=True)
         scan_interval = 60.0
         self.last_scan_time = 0.0
 
@@ -198,7 +196,7 @@ class AresMasterSystem:
             except KeyboardInterrupt:
                 print("\n🛑 ربات متوقف شد.", flush=True)
                 sys.exit(0)
-            except Exception as e:
+            except Exception:
                 time.sleep(2.0)
 
 
