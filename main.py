@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 9.0 (AUTOMATED MT5 SIGNAL & POSITION DISPATCH)
+VERSION: 10.0 (STRICT DATABASE-BACKED 3-POSITION CEILING & MT5 DISPATCH)
 ================================================================================
 """
 
@@ -33,8 +33,6 @@ from market_data_connector import AresUnifiedDataService
 
 
 class AresMasterSystem:
-    """هسته ناظر سیستم معاملات هوشمند ARES"""
-
     SYMBOLS_SPECS = {
         "BTCUSDT": ContractSpecs("BTCUSDT", min_volume=0.001, max_volume=50.0, volume_step=0.001, tick_size=0.1, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
         "ETHUSDT": ContractSpecs("ETHUSDT", min_volume=0.01, max_volume=100.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
@@ -50,7 +48,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات خودکار ARES (ارسال زنده دستورات به متاتریدر ۵)")
+        print("🏛 راه‌اندازی ربات خودکار ARES (مدیریت سقف قطعی ۳ معامله بر پایه دیتابیس)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -81,7 +79,6 @@ class AresMasterSystem:
                 current_close=float(last_candle["close"]),
             )
 
-            # ارسال تغییرات SL/TP به متاتریدر در صورت وقوع Break-Even
             if update.get("events"):
                 for ev in update["events"]:
                     print(f"\n⚡ [کاربر {pos.user_id} | {pos.symbol}]: {ev}", flush=True)
@@ -108,7 +105,6 @@ class AresMasterSystem:
 
                 self.db.record_new_trade(pos.to_dict(), user_id=pos.user_id)
 
-            # بستن پوزیشن در صورت خروج
             if update.get("status") == "CLOSED":
                 pnl = update["position"]["realized_pnl"]
                 print(f"\n🔔 [تسویه پوزیشن {pos.symbol}]: سود/زیان = {pnl:+.2f}$", flush=True)
@@ -133,17 +129,18 @@ class AresMasterSystem:
             if not is_connected or equity <= 0:
                 continue
 
-            # کنترل قطعی سقف ۳ معامله
-            user_open_positions = [p for p in self.trade_engine.open_positions.values() if p.user_id == user_id]
-            if len(user_open_positions) >= 3:
+            # کنترل قطعی سقف ۳ معامله مستقیماً از روی پایگاه‌داده
+            active_trades_db = self.db.get_user_open_trades(user_id=user_id)
+            if len(active_trades_db) >= 3:
                 continue
 
             for symbol, specs in self.SYMBOLS_SPECS.items():
-                current_count = sum(1 for p in self.trade_engine.open_positions.values() if p.user_id == user_id)
-                if current_count >= 3:
+                # بررسی مجدد سقف پیش از تحلیل هر جفت‌ارز
+                current_active = self.db.get_user_open_trades(user_id=user_id)
+                if len(current_active) >= 3:
                     break
 
-                if any(p.symbol == symbol and p.user_id == user_id for p in self.trade_engine.open_positions.values()):
+                if any(t["symbol"] == symbol for t in current_active):
                     continue
 
                 news_status = self.news_filter.is_news_restricted(symbol)
@@ -188,10 +185,9 @@ class AresMasterSystem:
                             print(f"\n🔥 [سیگنال تایید شد]: {symbol} {opportunity.direction} | ارسال به متاتریدر...", flush=True)
                             self.db.record_new_trade(pos.to_dict(), user_id=user_id)
 
-                            # ارسال دستور فوری به صف اکسپرت متاتریدر ۵
                             user_identifier = user.get("identifier", user_id)
                             account_config.queue_mt5_command(user_identifier, {
-                                "action": opportunity.direction,  # 'BUY' یا 'SELL'
+                                "action": opportunity.direction,
                                 "symbol": symbol,
                                 "volume": risk_decision.calculated_volume,
                                 "sl": opportunity.stop_loss,

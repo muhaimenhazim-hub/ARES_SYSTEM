@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 11.5 (LIVE POSITION TABLE RENDERER & AUTO ZERO GHOST TRADES)
+VERSION: 12.0 (AUTO SYNC WITH REAL MT5 POSITIONS)
 ================================================================================
 """
 
@@ -29,7 +29,6 @@ app.add_middleware(
 )
 
 db = AresDatabaseManager()
-PENDING_MT5_ORDERS: Dict[str, List[Dict[str, Any]]] = {}
 
 
 def get_local_ip():
@@ -324,7 +323,8 @@ HTML_TEMPLATE = """
                 document.getElementById('daily-pnl').innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
                 document.getElementById('daily-pnl').className = `text-2xl md:text-3xl font-extrabold mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`;
                 
-                const openCount = data.is_connected ? data.open_positions_count : 0;
+                // عدد پوزیشن‌های باز همیشه معادل معاملات واقعی جدول است
+                const openCount = data.open_positions_count;
                 document.getElementById('open-positions-count').innerText = `${openCount} / 3`;
                 document.getElementById('account-id-display').innerText = data.account_info;
                 document.getElementById('broker-connected-info').innerText = data.broker_info;
@@ -339,7 +339,6 @@ HTML_TEMPLATE = """
                     lblToggle.innerText = "اجازه معامله به ربات (شروع معامله)";
                 }
 
-                // به‌روزرسانی ردیف‌های جدول پوزیشن‌های باز
                 renderOpenTrades(data.open_trades || []);
             } catch (err) {}
         }
@@ -450,7 +449,11 @@ async def bridge_sync_api(request: Request):
     if identifier:
         account_config.update_bridge_data(identifier, data)
 
-    # تحویل دستورات ترید به اکسپرت متاتریدر
+    # پاکسازی خودکار معاملات شبح در صورت صفر بودن معاملات واقعی متاتریدر
+    open_pos_mt5 = int(data.get("open_positions", 0))
+    if open_pos_mt5 == 0:
+        db.clean_all_mock_data()
+
     pending_orders: List[Dict[str, Any]] = []
     if identifier:
         pending_orders = account_config.pop_pending_mt5_commands(identifier)
