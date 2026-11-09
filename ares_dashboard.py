@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 6.0 (STRICT VALIDATION & ZERO PHANTOM METRICS)
+VERSION: 7.0 (LTR BADGE FIX & HYBRID ZERO-COST ENGINE)
 ================================================================================
 """
 
@@ -46,6 +46,7 @@ HTML_TEMPLATE = """
         .card { background-color: #151b26; border: 1px solid #232d3f; border-radius: 0.75rem; }
         .glow-green { box-shadow: 0 0 15px rgba(16, 185, 129, 0.2); }
         .modal { background-color: rgba(0, 0, 0, 0.85); backdrop-filter: blur(6px); }
+        .ltr-num { direction: ltr; display: inline-block; }
     </style>
 </head>
 <body class="p-4 md:p-6 min-h-screen flex flex-col justify-between">
@@ -139,7 +140,7 @@ HTML_TEMPLATE = """
                     <span>پوزیشن‌های فعال</span>
                     <i class="fa-solid fa-layer-group text-purple-400"></i>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="open-positions-count">0 / 3</div>
+                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2 ltr-num" id="open-positions-count">0 / 3</div>
                 <div class="text-xs text-gray-400 mt-2">سقف مجاز: حداکثر ۳ پوزیشن</div>
             </div>
 
@@ -182,7 +183,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- مودال تنظیمات با اعتبارسنجی دقیق -->
+    <!-- مودال تنظیمات با اعتبارسنجی -->
     <div id="settings-modal" class="fixed inset-0 modal flex items-center justify-center p-4 hidden z-50">
         <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-xl w-full p-6 text-right max-h-[90vh] overflow-y-auto shadow-2xl">
             <div class="flex justify-between items-center pb-3 border-b border-gray-800">
@@ -321,7 +322,6 @@ HTML_TEMPLATE = """
                 const data = await res.json();
                 document.getElementById('equity-val').innerText = `$${data.equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
                 
-                // در صورت عدم اتصال حساب، سود صفر نمایش داده می‌شود تا دیتای فرضی نباشد
                 const pnl = data.is_connected ? data.daily_pnl : 0.0;
                 document.getElementById('daily-pnl').innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
                 document.getElementById('daily-pnl').className = `text-2xl md:text-3xl font-extrabold mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`;
@@ -420,7 +420,7 @@ HTML_TEMPLATE = """
 
             const data = await res.json();
             if (res.ok) {
-                alert("اطلاعات ثبت شد. در حال استقرار و خواندن موجودی از سرور بروکر...");
+                alert("حساب با موفقیت متصل شد.");
                 closeSettingsModal();
                 fetchUserStatus();
             } else {
