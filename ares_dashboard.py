@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 8.0 (ANTI-FLICKER & STRICT ZERO-PHANTOM)
+VERSION: 9.0 (MQL5 DIRECT BRIDGE LISTENER)
 ================================================================================
 """
 
@@ -50,7 +50,6 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-4 md:p-6 min-h-screen flex flex-col justify-between">
 
-    <!-- صفحه ورود و ثبت نام (پیش‌فرض مخفی برای جلوگیری از پرش صفحه) -->
     <div id="auth-container" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b0e14] hidden">
         <div class="card max-w-md w-full p-6 md:p-8 text-right border-gray-800 shadow-2xl">
             <div class="text-center mb-6">
@@ -83,7 +82,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- داشبورد اصلی (پیش‌فرض مخفی تا احراز هویت بدون پرش بررسی شود) -->
     <div id="main-dashboard" class="hidden">
         <header class="flex flex-wrap justify-between items-center mb-6 pb-4 border-b border-gray-800 gap-4">
             <div>
@@ -114,15 +112,14 @@ HTML_TEMPLATE = """
             </div>
         </header>
 
-        <!-- کارت‌های مالی -->
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 md:gap-6 mb-8">
             <div class="card p-5 glow-green">
                 <div class="text-gray-400 text-sm font-medium flex justify-between">
-                    <span>موجودی حساب (Equity)</span>
+                    <span>موجودی واقعی حساب (Equity)</span>
                     <i class="fa-solid fa-wallet text-emerald-400"></i>
                 </div>
                 <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="equity-val">$0.00</div>
-                <div class="text-xs text-gray-400 mt-2 font-medium" id="account-id-display">هیچ حسابی متصل نیست</div>
+                <div class="text-xs text-gray-400 mt-2 font-medium" id="account-id-display">در انتظار اتصال اکسپرت متاتریدر</div>
             </div>
 
             <div class="card p-5">
@@ -131,7 +128,7 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-chart-line text-blue-400"></i>
                 </div>
                 <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="daily-pnl">$0.00</div>
-                <div class="text-xs text-gray-400 mt-2">محاسبه بر اساس معاملات بسته شده شما</div>
+                <div class="text-xs text-gray-400 mt-2">معاملات واقعی بسته شده</div>
             </div>
 
             <div class="card p-5">
@@ -153,7 +150,6 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- جدول پوزیشن‌ها -->
         <div class="card p-4 md:p-6 mb-8">
             <h2 class="text-base font-bold text-gray-200 mb-4 flex items-center gap-2">
                 <i class="fa-solid fa-bolt text-amber-400"></i> پوزیشن‌های باز اکانت شما
@@ -192,28 +188,13 @@ HTML_TEMPLATE = """
                 <button onclick="closeSettingsModal()" class="text-gray-400 hover:text-white text-xl">&times;</button>
             </div>
 
-            <div class="mt-4">
-                <label class="block text-xs font-bold text-gray-400 mb-1">حالت معامله:</label>
-                <select id="cfg-trading-mode" class="w-full bg-gray-800 border border-gray-700 rounded-lg p-2.5 text-xs text-white">
-                    <option value="PAPER">آزمایشی (Paper Trading)</option>
-                    <option value="LIVE">حساب واقعی لایو (Live Trading)</option>
-                </select>
-            </div>
-
-            <!-- متاتریدر ۵ -->
-            <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-gray-700/60 space-y-2.5 text-xs">
-                <h4 class="font-bold text-emerald-400 flex items-center gap-1.5"><i class="fa-solid fa-chart-line"></i> متاتریدر ۵ (فارکس و انس طلا)</h4>
+            <!-- راهنمای اکسپرت متاتریدر -->
+            <div class="mt-4 p-4 rounded-lg bg-emerald-950/30 border border-emerald-800/60 space-y-2 text-xs">
+                <h4 class="font-bold text-emerald-400 flex items-center gap-1.5"><i class="fa-solid fa-circle-check"></i> نحوه اتصال متاتریدر ۵ (دمو / پراپ / ریل)</h4>
+                <p class="text-gray-300">برای اتصال رایگان، فقط کافیست اکسپرت <code class="bg-gray-800 px-1 py-0.5 rounded text-emerald-300">AresBridgeEA</code> را در متاتریدر خود اجرا کنید. متاتریدر به طور خودکار موجودی و معاملات شما را به این دشبورد وصل می‌کند.</p>
                 <div>
-                    <label class="block text-gray-400 mb-1">شماره حساب (Login):</label>
-                    <input type="text" id="cfg-mt5-login" placeholder="شماره حساب متاتریدر" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
-                </div>
-                <div>
-                    <label class="block text-gray-400 mb-1">رمز عبور (Password):</label>
-                    <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
-                </div>
-                <div>
-                    <label class="block text-gray-400 mb-1">نام دقیق سرور بروکر (Server):</label>
-                    <input type="text" id="cfg-mt5-server" placeholder="مثال: MetaQuotes-Demo" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    <label class="block text-gray-400 mb-1">شماره حساب متاتریدر ۵:</label>
+                    <input type="text" id="cfg-mt5-login" placeholder="مثال: 115293699" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                 </div>
             </div>
 
@@ -231,9 +212,9 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="mt-6 flex justify-end gap-3">
-                <button onclick="closeSettingsModal()" class="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg text-xs">انصراف</button>
+                <button onclick="closeSettingsModal()" class="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg text-xs">بستن</button>
                 <button onclick="saveAccountSettings()" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold">
-                    ذخیره و اتصال
+                    ذخیره تنظیمات
                 </button>
             </div>
         </div>
@@ -241,13 +222,10 @@ HTML_TEMPLATE = """
 
     <script>
         let currentUser = null;
-        try {
-            currentUser = JSON.parse(localStorage.getItem('ares_user') || 'null');
-        } catch(e) {}
+        try { currentUser = JSON.parse(localStorage.getItem('ares_user') || 'null'); } catch(e) {}
 
         let currentAuthMode = 'login';
 
-        // جلوگیری قطعی از پرش صفحه (بررسی اولیه قبل از رندر)
         if (currentUser && currentUser.user_id) {
             document.getElementById('main-dashboard').classList.remove('hidden');
             document.getElementById('auth-container').classList.add('hidden');
@@ -280,7 +258,7 @@ HTML_TEMPLATE = """
             const errBox = document.getElementById('auth-error-msg');
 
             if (!identifier || !password) {
-                errBox.innerText = "لطفاً ایمیل/موبایل و کلمه عبور را وارد کنید.";
+                errBox.innerText = "لطفاً اطلاعات را وارد کنید.";
                 errBox.classList.remove('hidden');
                 return;
             }
@@ -300,11 +278,11 @@ HTML_TEMPLATE = """
                     document.getElementById('main-dashboard').classList.remove('hidden');
                     initDashboard();
                 } else {
-                    errBox.innerText = data.detail || "خطا در عملیات ورود/ثبت‌نام";
+                    errBox.innerText = data.detail || "خطا در ورود";
                     errBox.classList.remove('hidden');
                 }
             } catch (err) {
-                errBox.innerText = "ارتباط با سرور برقرار نشد.";
+                errBox.innerText = "خطا در ارتباط با سرور";
                 errBox.classList.remove('hidden');
             }
         }
@@ -319,7 +297,7 @@ HTML_TEMPLATE = """
             if (!currentUser) return;
             document.getElementById('user-display-badge').innerText = `👤 کاربر: ${currentUser.identifier}`;
             fetchUserStatus();
-            setInterval(fetchUserStatus, 2500);
+            setInterval(fetchUserStatus, 2000);
         }
 
         async function fetchUserStatus() {
@@ -353,9 +331,7 @@ HTML_TEMPLATE = """
                     btnToggle.className = "bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1.5 shadow-md";
                     lblToggle.innerText = "اجازه معامله به ربات (شروع معامله)";
                 }
-            } catch (err) {
-                console.error(err);
-            }
+            } catch (err) {}
         }
 
         async function toggleAutoTrading() {
@@ -371,7 +347,7 @@ HTML_TEMPLATE = """
 
         async function disconnectBroker() {
             if (!currentUser) return;
-            if (!confirm("آیا از قطع ارتباط کامل حساب خود و توقف تمام معاملات اطمینان دارید؟")) return;
+            if (!confirm("آیا از قطع ارتباط کامل حساب خود اطمینان دارید؟")) return;
             const res = await fetch('/api/user/disconnect', {
                 method: 'POST',
                 headers: {'X-User-Id': currentUser.user_id}
@@ -388,9 +364,7 @@ HTML_TEMPLATE = """
             })
             .then(r => r.json())
             .then(data => {
-                document.getElementById('cfg-trading-mode').value = data.trading_mode || 'PAPER';
                 document.getElementById('cfg-mt5-login').value = data.mt5_login || '';
-                document.getElementById('cfg-mt5-server').value = data.mt5_server || '';
                 document.getElementById('cfg-binance-key').value = data.binance_api_key || '';
                 document.getElementById('settings-modal').classList.remove('hidden');
             });
@@ -402,24 +376,10 @@ HTML_TEMPLATE = """
 
         async function saveAccountSettings() {
             if (!currentUser) return;
-            const loginVal = document.getElementById('cfg-mt5-login').value.trim();
-            const passVal = document.getElementById('cfg-mt5-pass').value.trim();
-            const serverVal = document.getElementById('cfg-mt5-server').value.trim();
-            const binanceKey = document.getElementById('cfg-binance-key').value.trim();
-            const binanceSec = document.getElementById('cfg-binance-secret').value.trim();
-
-            if (!binanceKey && (!loginVal || !passVal || !serverVal)) {
-                alert("لطفاً مشخصات حساب متاتریدر را کامل وارد کنید.");
-                return;
-            }
-
             const payload = {
-                trading_mode: document.getElementById('cfg-trading-mode').value,
-                mt5_login: loginVal,
-                mt5_pass: passVal,
-                mt5_server: serverVal,
-                binance_api_key: binanceKey,
-                binance_secret_key: binanceSec,
+                mt5_login: document.getElementById('cfg-mt5-login').value.trim(),
+                binance_api_key: document.getElementById('cfg-binance-key').value.trim(),
+                binance_secret_key: document.getElementById('cfg-binance-secret').value.trim(),
             };
 
             const res = await fetch('/api/user/config', {
@@ -433,17 +393,30 @@ HTML_TEMPLATE = """
 
             const data = await res.json();
             if (res.ok) {
-                alert("حساب با موفقیت تنظیم شد.");
+                alert("تنظیمات با موفقیت ذخیره شد.");
                 closeSettingsModal();
                 fetchUserStatus();
-            } else {
-                alert("خطا در ذخیره مشخصات");
             }
         }
     </script>
 </body>
 </html>
 """
+
+
+# -------------------------------------------------------------------------
+# نقطه اتصال اختصاصی اکسپرت متاتریدر ۵ (MQL5 Bridge Endpoint)
+# -------------------------------------------------------------------------
+@app.post("/api/bridge/sync")
+async def bridge_sync_api(request: Request):
+    """دریافت آنی وضعیت واقعی متاتریدر از اکسپرت MQL5"""
+    data = await request.json()
+    identifier = data.get("identifier", "").strip().lower()
+    if identifier:
+        account_config.update_bridge_data(identifier, data)
+
+    # بازگرداندن دستورات ترید معلق به اکسپرت (در صورت وجود سیگنال خرید/فروش)
+    return {"status": "SYNCED", "orders": []}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -456,7 +429,6 @@ async def register_api(request: Request):
     data = await request.json()
     identifier = data.get("identifier", "").strip()
     password = data.get("password", "").strip()
-
     res = db.register_user(identifier, password)
     if not res:
         raise HTTPException(status_code=400, detail="این شماره/ایمیل قبلاً ثبت شده یا کلمه عبور کوتاه است.")
@@ -468,7 +440,6 @@ async def login_api(request: Request):
     data = await request.json()
     identifier = data.get("identifier", "").strip()
     password = data.get("password", "").strip()
-
     user = db.authenticate_user(identifier, password)
     if not user:
         raise HTTPException(status_code=401, detail="اطلاعات ورود یا کلمه عبور نادرست است.")
@@ -481,6 +452,7 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
 
     user_cfg = db.get_user_broker_config(x_user_id)
+    user_cfg["user_id"] = x_user_id
     equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
     summary = db.get_portfolio_summary(user_id=x_user_id)
 
@@ -501,9 +473,7 @@ def get_user_config_api(x_user_id: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
     cfg = db.get_user_broker_config(x_user_id)
     return {
-        "trading_mode": cfg.get("trading_mode", "PAPER"),
         "mt5_login": cfg.get("mt5_login", ""),
-        "mt5_server": cfg.get("mt5_server", ""),
         "binance_api_key": cfg.get("binance_api_key", ""),
     }
 
@@ -512,10 +482,9 @@ def get_user_config_api(x_user_id: Optional[str] = Header(None)):
 async def save_user_config_api(request: Request, x_user_id: Optional[str] = Header(None)):
     if not x_user_id:
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
-
     new_cfg = await request.json()
     db.save_user_broker_config(x_user_id, new_cfg)
-    return {"status": "SUCCESS", "message": "تنظیمات حساب شما با موفقیت ذخیره شد."}
+    return {"status": "SUCCESS", "message": "تنظیمات با موفقیت ذخیره شد."}
 
 
 @app.post("/api/user/toggle-trading")
@@ -523,7 +492,7 @@ def toggle_trading_api(x_user_id: Optional[str] = Header(None)):
     if not x_user_id:
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
     new_state = db.toggle_auto_trading(x_user_id)
-    status_txt = "فعال شد. ربات روی حساب شما معامله خواهد کرد." if new_state else "متوقف شد. هیچ معامله جدیدی باز نمی‌شود."
+    status_txt = "فعال شد." if new_state else "متوقف شد."
     return {"status": "SUCCESS", "is_auto_trading": new_state, "message": f"معامله خودکار {status_txt}"}
 
 
@@ -532,13 +501,10 @@ def disconnect_broker_api(x_user_id: Optional[str] = Header(None)):
     if not x_user_id:
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
     db.disconnect_broker(x_user_id)
-    return {"status": "SUCCESS", "message": "ارتباط با حساب متاتریدر/صرافی با موفقیت قطع شد."}
+    return {"status": "SUCCESS", "message": "ارتباط قطع شد."}
 
 
 if __name__ == "__main__":
     local_ip = get_local_ip()
-    print("=" * 75)
-    print("داشبورد چندکاربره سیستم ARES فعال شد.")
     print(f"آدرس ورود: http://{local_ip}:8000")
-    print("=" * 75)
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
