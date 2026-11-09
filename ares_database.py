@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 3.5 (MT5 TICKET PERSISTENCE & CONCURRENT WAL ENGINE)
+VERSION: 4.0 (AUTO-SYNC ZERO GHOST TRADES & LIVE TABLE FETCHER)
 ================================================================================
 """
 
@@ -14,10 +14,6 @@ from typing import Any, Dict, List, Optional
 
 
 class AresDatabaseManager:
-    """
-    مدیر پایگاه داده چندکاربره سیستم ARES مجهز به احراز هویت، ایزوله‌سازی اکانت‌ها و ثبت تیکت MT5
-    """
-
     def __init__(self, db_path: str = "ares_trading.db"):
         self.db_path = db_path
         self._initialize_database()
@@ -35,7 +31,6 @@ class AresDatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # ۱. جدول کاربران
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
@@ -45,7 +40,6 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۲. جدول تنظیمات اختصاصی بروکر هر کاربر
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_broker_configs (
                     user_id TEXT PRIMARY KEY,
@@ -61,7 +55,6 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۳. جدول معاملات مجهز به ستون شماره تیکت متاتریدر ۵
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     trade_id VARCHAR(64) PRIMARY KEY,
@@ -89,13 +82,11 @@ class AresDatabaseManager:
                 );
             """)
 
-            # افزودن امن ستون mt5_ticket در صورت موجود نبودن در دیتابیس فعلی
             try:
                 cursor.execute("ALTER TABLE trades ADD COLUMN mt5_ticket INTEGER DEFAULT 0;")
             except sqlite3.OperationalError:
-                pass  # ستون از قبل وجود دارد
+                pass
 
-            # ۴. جدول خروج‌های پله‌ای
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS partial_exits (
                     exit_id VARCHAR(64) PRIMARY KEY,
@@ -109,7 +100,6 @@ class AresDatabaseManager:
                 );
             """)
 
-            # ۵. جدول ثبت ارزیابی فرصت‌ها
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS setups_log (
                     setup_id VARCHAR(64) PRIMARY KEY,
@@ -246,14 +236,29 @@ class AresDatabaseManager:
             return [dict(r) for r in cursor.fetchall()]
 
     def clean_all_mock_data(self):
+        """پاکسازی معاملات تست قدیمی و بستن پوزیشن‌های شبح"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM trades WHERE trade_id LIKE 'POS_TEST%' OR trade_id LIKE 'TEST%' OR trade_id LIKE 'MOCK%';")
+                cursor.execute("UPDATE trades SET status = 'CLOSED' WHERE status = 'OPEN';")
                 cursor.execute("DELETE FROM partial_exits;")
                 conn.commit()
         except Exception:
             pass
+
+    def get_user_open_trades(self, user_id: str) -> List[Dict[str, Any]]:
+        """دریافت لیست واقعی معاملات باز کاربر جهت نمایش در جدول داشبورد"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT trade_id, symbol, side, entry_price, stop_loss, current_volume, 
+                       realized_pnl, status, mt5_ticket
+                FROM trades 
+                WHERE user_id = ? AND status = 'OPEN'
+                ORDER BY opened_at DESC;
+            """, (user_id,))
+            return [dict(r) for r in cursor.fetchall()]
 
     def record_new_trade(self, pos_data: Dict[str, Any], user_id: str = "default"):
         targets = pos_data.get("targets", {})
@@ -342,20 +347,16 @@ class AresDatabaseManager:
             cursor = conn.cursor()
 
             if user_id:
-                cursor.execute("SELECT COUNT(*) FROM trades WHERE user_id = ? AND trade_id NOT LIKE 'POS_TEST%';", (user_id,))
-                total_trades = cursor.fetchone()[0]
-
-                cursor.execute("SELECT COUNT(*) FROM trades WHERE user_id = ? AND status = 'OPEN' AND trade_id NOT LIKE 'POS_TEST%';", (user_id,))
+                cursor.execute("SELECT COUNT(*) FROM trades WHERE user_id = ? AND status = 'OPEN';", (user_id,))
                 open_trades = cursor.fetchone()[0]
 
                 cursor.execute("""
                     SELECT SUM(realized_pnl), SUM(total_fees) 
                     FROM trades 
-                    WHERE user_id = ? AND status = 'CLOSED' AND trade_id NOT LIKE 'POS_TEST%';
+                    WHERE user_id = ? AND status = 'CLOSED';
                 """, (user_id,))
                 row = cursor.fetchone()
             else:
-                total_trades = 0
                 open_trades = 0
                 row = None
 
@@ -363,7 +364,6 @@ class AresDatabaseManager:
             total_fees = row[1] if (row and row[1] is not None) else 0.0
 
             return {
-                "total_trades_count": total_trades,
                 "open_trades_count": open_trades,
                 "net_realized_pnl_usd": round(total_pnl, 2),
                 "total_fees_paid_usd": round(total_fees, 2),

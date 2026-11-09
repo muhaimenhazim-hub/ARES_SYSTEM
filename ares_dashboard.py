@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 11.2 (PRODUCTION PORT 80 + COMMAND DISPATCH QUEUE)
+VERSION: 11.5 (LIVE POSITION TABLE RENDERER & AUTO ZERO GHOST TRADES)
 ================================================================================
 """
 
@@ -20,7 +20,6 @@ from ares_database import AresDatabaseManager
 
 app = FastAPI(title="ARES AI MULTI-USER TRADING DASHBOARD")
 
-# فعال‌سازی CORS برای جلوگیری از مسدود شدن درخواست‌های وب و متاتریدر
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,17 +29,7 @@ app.add_middleware(
 )
 
 db = AresDatabaseManager()
-
-# صف حافظه‌ای تبادل دستورات معامله به اکسپرت متاتریدر (Identifier -> List[Command])
 PENDING_MT5_ORDERS: Dict[str, List[Dict[str, Any]]] = {}
-
-
-def queue_order_for_mt5(identifier: str, command: Dict[str, Any]):
-    """افزودن دستور ترید به صف ارسال به اکسپرت متاتریدر"""
-    clean_id = identifier.strip().lower()
-    if clean_id not in PENDING_MT5_ORDERS:
-        PENDING_MT5_ORDERS[clean_id] = []
-    PENDING_MT5_ORDERS[clean_id].append(command)
 
 
 def get_local_ip():
@@ -180,7 +169,7 @@ HTML_TEMPLATE = """
                 <table class="w-full text-right text-xs md:text-sm">
                     <thead class="text-gray-400 bg-gray-900/50 uppercase border-b border-gray-800">
                         <tr>
-                            <th class="py-3 px-3">شناسه</th>
+                            <th class="py-3 px-3">شناسه / تیکت</th>
                             <th class="py-3 px-3">نماد</th>
                             <th class="py-3 px-3">جهت</th>
                             <th class="py-3 px-3">قیمت ورود</th>
@@ -349,7 +338,37 @@ HTML_TEMPLATE = """
                     btnToggle.className = "bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1.5 shadow-md";
                     lblToggle.innerText = "اجازه معامله به ربات (شروع معامله)";
                 }
+
+                // به‌روزرسانی ردیف‌های جدول پوزیشن‌های باز
+                renderOpenTrades(data.open_trades || []);
             } catch (err) {}
+        }
+
+        function renderOpenTrades(trades) {
+            const tableBody = document.getElementById('open-trades-table');
+            if (!trades || trades.length === 0) {
+                tableBody.innerHTML = '<tr><td colspan="8" class="py-6 text-center text-gray-500">هیچ معامله بازی وجود ندارد.</td></tr>';
+                return;
+            }
+
+            let html = '';
+            for (const t of trades) {
+                const sideColor = t.side === 'BUY' ? 'text-emerald-400 bg-emerald-950/40 border-emerald-800' : 'text-red-400 bg-red-950/40 border-red-800';
+                const pnlColor = t.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
+                html += `
+                    <tr class="hover:bg-gray-800/40 transition">
+                        <td class="py-3 px-3 font-mono">${t.mt5_ticket ? '#' + t.mt5_ticket : t.trade_id.substring(0, 10)}</td>
+                        <td class="py-3 px-3 font-bold text-white">${t.symbol}</td>
+                        <td class="py-3 px-3"><span class="px-2 py-0.5 rounded border text-xs font-bold ${sideColor}">${t.side}</span></td>
+                        <td class="py-3 px-3 font-mono">${t.entry_price}</td>
+                        <td class="py-3 px-3 font-mono text-red-400">${t.stop_loss}</td>
+                        <td class="py-3 px-3 font-mono">${t.current_volume}</td>
+                        <td class="py-3 px-3 font-mono font-bold ${pnlColor}">${t.realized_pnl >= 0 ? '+' : ''}$${t.realized_pnl.toFixed(2)}</td>
+                        <td class="py-3 px-3"><span class="text-xs text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">فعال (Open)</span></td>
+                    </tr>
+                `;
+            }
+            tableBody.innerHTML = html;
         }
 
         async function toggleAutoTrading() {
@@ -424,7 +443,6 @@ HTML_TEMPLATE = """
 
 @app.post("/api/bridge/sync")
 async def bridge_sync_api(request: Request):
-    """دریافت زنده دیتای حساب از اکسپرت متاتریدر ۵ و تحویل دستورات ترید منتظر"""
     data = await request.json()
     identifier = data.get("identifier", "").strip().lower()
     login_str = str(data.get("login", "")).strip()
@@ -432,12 +450,12 @@ async def bridge_sync_api(request: Request):
     if identifier:
         account_config.update_bridge_data(identifier, data)
 
-    # استخراج سفارش‌های در صف برای این کاربر
+    # تحویل دستورات ترید به اکسپرت متاتریدر
     pending_orders: List[Dict[str, Any]] = []
-    if identifier and identifier in PENDING_MT5_ORDERS:
-        pending_orders = PENDING_MT5_ORDERS.pop(identifier)
-    elif login_str and login_str in PENDING_MT5_ORDERS:
-        pending_orders = PENDING_MT5_ORDERS.pop(login_str)
+    if identifier:
+        pending_orders = account_config.pop_pending_mt5_commands(identifier)
+    if not pending_orders and login_str:
+        pending_orders = account_config.pop_pending_mt5_commands(login_str)
 
     return {"status": "SYNCED", "orders": pending_orders}
 
@@ -477,7 +495,6 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
     user_cfg = db.get_user_broker_config(x_user_id)
     user_cfg["user_id"] = x_user_id
 
-    # استخراج هوشمند شماره همراه از دیتابیس برای انطباق ۱۰۰٪
     try:
         with db._get_connection() as conn:
             c = conn.cursor()
@@ -490,11 +507,13 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
 
     equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
     summary = db.get_portfolio_summary(user_id=x_user_id)
+    open_trades_list = db.get_user_open_trades(user_id=x_user_id)
 
     return {
         "equity": equity,
         "daily_pnl": summary.get("net_realized_pnl_usd", 0.0) if is_conn else 0.0,
-        "open_positions_count": summary.get("open_trades_count", 0) if is_conn else 0,
+        "open_positions_count": len(open_trades_list) if is_conn else 0,
+        "open_trades": open_trades_list if is_conn else [],
         "account_info": acc_info,
         "broker_info": broker_info,
         "is_connected": is_conn,
@@ -544,6 +563,5 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
     print("=" * 70)
     print(f"🏛 سامانه معاملاتی ARES روی پورت استاندارد {server_port} راه‌اندازی شد.")
-    print(f"🔗 آدرس ورود مستقیم در مرورگر: http://{local_ip} یا http://141.98.166.81")
     print("=" * 70)
     uvicorn.run(app, host="0.0.0.0", port=server_port, log_level="warning")
