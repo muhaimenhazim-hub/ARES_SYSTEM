@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 11.0 (TURBO SPEED 1s POSITION CHECK & 5s OPPORTUNITY SCAN)
+VERSION: 12.0 (STRICT BROKER-ACCOUNT MARKET ISOLATION)
 ================================================================================
 """
 
@@ -34,21 +34,23 @@ from market_data_connector import AresUnifiedDataService
 
 class AresMasterSystem:
     SYMBOLS_SPECS = {
+        # فارکس و انس طلا (مخصوص متاتریدر ۵)
+        "XAUUSD": ContractSpecs("XAUUSD", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=100.0, min_notional_usd=1.0, leverage=100.0),
+        "EURUSD": ContractSpecs("EURUSD", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.00001, contract_size=100000.0, min_notional_usd=1.0, leverage=100.0),
+        "NASDAQ 100": ContractSpecs("NASDAQ 100", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
+        "S&P 500": ContractSpecs("S&P 500", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
+        # کریپتو فیوچرز (فقط در صورت اتصال API بایننس)
         "BTCUSDT": ContractSpecs("BTCUSDT", min_volume=0.001, max_volume=50.0, volume_step=0.001, tick_size=0.1, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
         "ETHUSDT": ContractSpecs("ETHUSDT", min_volume=0.01, max_volume=100.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
         "BNBUSDT": ContractSpecs("BNBUSDT", min_volume=0.01, max_volume=100.0, volume_step=0.01, tick_size=0.1, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
         "ADAUSDT": ContractSpecs("ADAUSDT", min_volume=1.0, max_volume=10000.0, volume_step=1.0, tick_size=0.0001, contract_size=1.0, min_notional_usd=5.0, leverage=10.0),
         "XRPUSDT": ContractSpecs("XRPUSDT", min_volume=1.0, max_volume=10000.0, volume_step=1.0, tick_size=0.0001, contract_size=1.0, min_notional_usd=5.0, leverage=10.0),
         "1000PEPEUSDT": ContractSpecs("1000PEPEUSDT", min_volume=100.0, max_volume=1000000.0, volume_step=100.0, tick_size=0.000001, contract_size=1.0, min_notional_usd=5.0, leverage=10.0),
-        "XAUUSD": ContractSpecs("XAUUSD", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=100.0, min_notional_usd=1.0, leverage=100.0),
-        "EURUSD": ContractSpecs("EURUSD", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.00001, contract_size=100000.0, min_notional_usd=1.0, leverage=100.0),
-        "NASDAQ 100": ContractSpecs("NASDAQ 100", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
-        "S&P 500": ContractSpecs("S&P 500", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
     }
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات فوق‌سریع ARES (پایش هر ۱ ثانیه و اسکن هر ۵ ثانیه)")
+        print("🏛 راه‌اندازی ربات ARES (تفکیک ۱۰۰٪ بازارها بر اساس اتصال متاتریدر/بایننس)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -63,7 +65,6 @@ class AresMasterSystem:
         self.last_scan_time: float = 0.0
 
     def manage_active_positions_fast(self):
-        """مدیریت لحظه‌ای پوزیشن‌های باز با تیک‌های سریع قیمت"""
         if not self.trade_engine.open_positions:
             return
 
@@ -129,11 +130,25 @@ class AresMasterSystem:
             if not is_connected or equity <= 0:
                 continue
 
+            # ۱. تشخیص نوع بروکر متصل کاربر (متاتریدر یا بایننس)
+            is_mt5_connected = "متاتریدر" in acc_info or bool(user.get("mt5_login"))
+            is_binance_connected = bool(user.get("binance_api_key") and user.get("binance_secret_key"))
+
             active_trades_db = self.db.get_user_open_trades(user_id=user_id)
             if len(active_trades_db) >= 3:
                 continue
 
             for symbol, specs in self.SYMBOLS_SPECS.items():
+                is_crypto = symbol in self.data_service.binance.CRYPTO_SYMBOLS
+
+                # فیلتر قطعی ۱: اگر کاربر فقط متاتریدر دارد، کریپتوها اصلاً اسکن نشوند!
+                if is_crypto and not is_binance_connected:
+                    continue
+
+                # فیلتر قطعی ۲: اگر کاربر فقط بایننس دارد، فارکس و طلا اسکن نشوند!
+                if not is_crypto and not is_mt5_connected:
+                    continue
+
                 current_active = self.db.get_user_open_trades(user_id=user_id)
                 if len(current_active) >= 3:
                     break
@@ -180,7 +195,7 @@ class AresMasterSystem:
                             user_id=user_id,
                         )
                         if success:
-                            print(f"\n🔥 [سیگنال تایید شد]: {symbol} {opportunity.direction} | ارسال فوری به متاتریدر...", flush=True)
+                            print(f"\n🔥 [سیگنال واقعی تایید شد]: {symbol} {opportunity.direction} برای متاتریدر...", flush=True)
                             self.db.record_new_trade(pos.to_dict(), user_id=user_id)
 
                             user_identifier = user.get("identifier", user_id)
@@ -193,14 +208,13 @@ class AresMasterSystem:
                             })
 
     def run_loop(self):
-        print("\n🚀 ناظر هوشمند با سرعت بالا فعال شد.\n", flush=True)
-        scan_interval = 5.0  # اسکن سریع هر ۵ ثانیه
+        print("\n🚀 ناظر هوشمند با تفکیک دقیق بازارها فعال شد.\n", flush=True)
+        scan_interval = 5.0
         self.last_scan_time = 0.0
 
         while True:
             try:
                 current_time = time.time()
-                # پایش پوزیشن‌های باز در هر ۱ ثانیه
                 self.manage_active_positions_fast()
 
                 if current_time - self.last_scan_time >= scan_interval:
