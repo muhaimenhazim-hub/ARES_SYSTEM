@@ -2,23 +2,45 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 11.0 (SEAMLESS IDENTIFIER BRIDGE MATCHER)
+VERSION: 11.2 (PRODUCTION PORT 80 + COMMAND DISPATCH QUEUE)
 ================================================================================
 """
 
 import os
 import socket
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 import account_config
 from ares_database import AresDatabaseManager
 
 app = FastAPI(title="ARES AI MULTI-USER TRADING DASHBOARD")
+
+# فعال‌سازی CORS برای جلوگیری از مسدود شدن درخواست‌های وب و متاتریدر
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 db = AresDatabaseManager()
+
+# صف حافظه‌ای تبادل دستورات معامله به اکسپرت متاتریدر (Identifier -> List[Command])
+PENDING_MT5_ORDERS: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def queue_order_for_mt5(identifier: str, command: Dict[str, Any]):
+    """افزودن دستور ترید به صف ارسال به اکسپرت متاتریدر"""
+    clean_id = identifier.strip().lower()
+    if clean_id not in PENDING_MT5_ORDERS:
+        PENDING_MT5_ORDERS[clean_id] = []
+    PENDING_MT5_ORDERS[clean_id].append(command)
 
 
 def get_local_ip():
@@ -402,12 +424,22 @@ HTML_TEMPLATE = """
 
 @app.post("/api/bridge/sync")
 async def bridge_sync_api(request: Request):
-    """دریافت زنده دیتای حساب از اکسپرت متاتریدر ۵"""
+    """دریافت زنده دیتای حساب از اکسپرت متاتریدر ۵ و تحویل دستورات ترید منتظر"""
     data = await request.json()
     identifier = data.get("identifier", "").strip().lower()
+    login_str = str(data.get("login", "")).strip()
+
     if identifier:
         account_config.update_bridge_data(identifier, data)
-    return {"status": "SYNCED", "orders": []}
+
+    # استخراج سفارش‌های در صف برای این کاربر
+    pending_orders: List[Dict[str, Any]] = []
+    if identifier and identifier in PENDING_MT5_ORDERS:
+        pending_orders = PENDING_MT5_ORDERS.pop(identifier)
+    elif login_str and login_str in PENDING_MT5_ORDERS:
+        pending_orders = PENDING_MT5_ORDERS.pop(login_str)
+
+    return {"status": "SYNCED", "orders": pending_orders}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -508,6 +540,10 @@ def disconnect_broker_api(x_user_id: Optional[str] = Header(None)):
 
 
 if __name__ == "__main__":
+    server_port = int(os.environ.get("PORT", 80))
     local_ip = get_local_ip()
-    print(f"آدرس ورود: http://{local_ip}:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+    print("=" * 70)
+    print(f"🏛 سامانه معاملاتی ARES روی پورت استاندارد {server_port} راه‌اندازی شد.")
+    print(f"🔗 آدرس ورود مستقیم در مرورگر: http://{local_ip} یا http://141.98.166.81")
+    print("=" * 70)
+    uvicorn.run(app, host="0.0.0.0", port=server_port, log_level="warning")
