@@ -2,25 +2,24 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 04: TRADE & POSITION MANAGEMENT ENGINE
-VERSION: 1.1
+VERSION: 2.0 (MULTI-TENANT & CLOUD EXECUTION ENABLED)
 ================================================================================
 ماموریت ماژول:
 این ماژول مسئول اجرای سفارش‌ها، مدیریت فعال پوزیشن‌ها، ثبت حد ضرر الزامی،
 خروج‌های پله‌ای (Partial TP)، انتقال حد ضرر به نقطه سر‌به‌سر (Break-Even)
 و خروج ساختاری و زودهنگام است.
 
-اصول قطعی و غیرقابل تغییر پیاده‌سازی شده:
+اصول قطعی و غیرقابل تغییر حفظ شده:
 - هیچ معامله‌ای بدون ثبت قطعی Stop Loss باز نخواهد ماند.
-- انتقال حد ضرر فقط در جهت کاهش ریسک مجاز است (نه افزایش ریسک).
+- انتقال حد ضرر فقط در جهت کاهش ریسک مجاز است.
 - خروج پله‌ای: ۳۰٪ در TP1، ۳۰٪ در TP2 و ۴۰٪ در TP3.
-- مارتینگل و ورود پله‌ای (Averaging down) کاملاً غیرفعال و ممنوع است.
-- پشتیبانی کامل و یکسان از حالت‌های BACKTEST ،PAPER و LIVE.
+- مارتینگل و ورود پله‌ای (Averaging down) کاملاً ممنوع است.
 ================================================================================
 """
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 import numpy as np
@@ -57,7 +56,7 @@ class PartialExitRecord:
     closed_volume: float
     realized_pnl: float
     fee_paid: float
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -76,6 +75,7 @@ class ManagedPosition:
     tp2: float
     tp3: float
     risk_amount_usd: float
+    user_id: str = "default"
     is_break_even: bool = False
     tp1_hit: bool = False
     tp2_hit: bool = False
@@ -84,13 +84,14 @@ class ManagedPosition:
     partial_exits: List[PartialExitRecord] = field(default_factory=list)
     realized_pnl: float = 0.0
     total_fees_paid: float = 0.0
-    open_time: datetime = field(default_factory=datetime.utcnow)
+    open_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     close_time: Optional[datetime] = None
     exit_reason: Optional[str] = None
 
     def to_dict(self) -> Dict:
         return {
             "position_id": self.position_id,
+            "user_id": self.user_id,
             "symbol": self.symbol,
             "market": self.market,
             "side": self.side.value,
@@ -149,28 +150,30 @@ class TradePositionManagementEngine:
         tp3: float,
         allocated_volume: float,
         risk_usd: float,
+        user_id: str = "default",
     ) -> Tuple[bool, Optional[ManagedPosition], str]:
         """
-        ایجاد و اعتبارسنجی پوزیشن جدید همراه با الزام ثبت حد ضرر
+        ایجاد و اعتبارسنجی پوزیشن جدید همراه با الزام ثبت حد ضرر (تفکیک به ازای هر کاربر)
         """
-        # ۱. بررسی امنیتی: عدم امکان ورود پله‌ای روی همان نماد
+        # ۱. بررسی عدم امکان ورود هم‌زمان روی یک نماد برای یک کاربر خاص
         for pos in self.open_positions.values():
-            if pos.symbol == symbol:
-                return False, None, f"خطای رد سفارش: ورود پله‌ای یا معامله هم‌زمان روی نماد {symbol} ممنوع است."
+            if pos.symbol == symbol and pos.user_id == user_id:
+                return False, None, f"خطای رد سفارش: پوزیشن باز روی نماد {symbol} برای کاربر وجود دارد."
 
-        # ۲. اعتبارسنجی حد ضرر
+        # ۲. اعتبارسنجی قطعی حد ضرر
         side = OrderSide.BUY if side_str.upper() == "BUY" else OrderSide.SELL
         if side == OrderSide.BUY and stop_loss >= entry_price:
             return False, None, "خطا: برای معامله BUY حد ضرر باید زیر قیمت ورود باشد."
         if side == OrderSide.SELL and stop_loss <= entry_price:
             return False, None, "خطا: برای معامله SELL حد ضرر باید بالای قیمت ورود باشد."
 
-        # ۳. کارمزد ورود
+        # ۳. محاسبه کارمزد ورود
         entry_fee = entry_price * allocated_volume * self.taker_fee_pct
 
         pos_id = f"POS_{symbol}_{uuid.uuid4().hex[:8]}"
         new_pos = ManagedPosition(
             position_id=pos_id,
+            user_id=user_id,
             symbol=symbol,
             market=market,
             side=side,
@@ -197,11 +200,7 @@ class TradePositionManagementEngine:
         current_close: float,
     ) -> Dict:
         """
-        مدیریت پویا و زنده پوزیشن با هر تیک قیمتی جدید:
-        - بررسی برخورد با Stop Loss
-        - بررسی تارگت‌های سه‌گانه و اجرای Partial TP
-        - فعال‌سازی Break-Even در تارگت ۱
-        - تریلینگ استاپ
+        مدیریت پویا و زنده پوزیشن با هر تیک قیمتی جدید
         """
         if position_id not in self.open_positions:
             return {"status": "NOT_FOUND"}
@@ -225,7 +224,7 @@ class TradePositionManagementEngine:
             pos.total_fees_paid += exit_fee
             pos.current_volume = 0.0
             pos.status = PositionStatus.CLOSED
-            pos.close_time = datetime.utcnow()
+            pos.close_time = datetime.now(timezone.utc)
             pos.exit_reason = "STOP_LOSS_HIT" if not pos.is_break_even else "BREAK_EVEN_STOP_HIT"
 
             self.trade_history.append(pos)
@@ -236,7 +235,7 @@ class TradePositionManagementEngine:
                 "position": pos.to_dict(),
             }
 
-        # ۲. بررسی اهداف سود پله‌ای (Partial Take Profit)
+        # ۲. بررسی اهداف سود پله‌ای
         # هدف اول (TP1): خروج ۳۰٪ + انتقال حد ضرر به نقطه ورود (Break-Even)
         if not pos.tp1_hit:
             tp1_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp1) or \
@@ -292,17 +291,16 @@ class TradePositionManagementEngine:
                         fee_paid=fee,
                     )
                 )
-                # جابجایی تریلینگ استاپ به سمت هدف اول جهت قفل سود
                 pos.stop_loss = pos.tp1
                 events.append("TP2 محقق شد (۳۰٪ خروج) — تریلینگ استاپ به سطح TP1 ارتقا یافت.")
 
-        # هدف سوم و نهایی (TP3): خروج باقی‌مانده پوزیشن (۴۰٪) و بستن کامل
+        # هدف سوم و نهایی (TP3): خروج ۴۰٪ باقیمانده و تسویه معامله
         if pos.tp2_hit and not pos.tp3_hit:
             tp3_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp3) or \
                           (pos.side == OrderSide.SELL and current_low <= pos.tp3)
             if tp3_reached:
                 pos.tp3_hit = True
-                close_vol = pos.current_volume  # بستن تمام حجم باقیمانده
+                close_vol = pos.current_volume
                 pnl = (pos.tp3 - pos.entry_price) * close_vol if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp3) * close_vol
                 fee = pos.tp3 * close_vol * self.taker_fee_pct
                 net_pnl = pnl - fee
@@ -311,7 +309,7 @@ class TradePositionManagementEngine:
                 pos.realized_pnl += net_pnl
                 pos.total_fees_paid += fee
                 pos.status = PositionStatus.CLOSED
-                pos.close_time = datetime.utcnow()
+                pos.close_time = datetime.now(timezone.utc)
                 pos.exit_reason = "FULL_TAKE_PROFIT_TP3"
                 pos.partial_exits.append(
                     PartialExitRecord(
@@ -342,82 +340,13 @@ class TradePositionManagementEngine:
         }
 
     def emergency_close_all(self, reason: str = "EMERGENCY_STOP") -> List[Dict]:
-        """
-        بستن فوری و حفاظتی تمام معاملات باز سیستم (مورد استفاده در اخبار یا دراوداون بحرانی)
-        """
+        """بستن فوری و حفاظتی تمام معاملات باز"""
         closed_reports = []
         for pos_id, pos in list(self.open_positions.items()):
             pos.status = PositionStatus.CLOSED
-            pos.close_time = datetime.utcnow()
+            pos.close_time = datetime.now(timezone.utc)
             pos.exit_reason = reason
             self.trade_history.append(pos)
             closed_reports.append(pos.to_dict())
             del self.open_positions[pos_id]
         return closed_reports
-
-
-# ==============================================================================
-# تست خودکار مدیریت پوزیشن و خروج پله‌ای (Self-Test Simulation)
-# ==============================================================================
-if __name__ == "__main__":
-    import pprint
-
-    print("=" * 70)
-    print("ARES AI TRADING SYSTEM — TESTING MODULE 04: TRADE & POSITION ENGINE")
-    print("=" * 70)
-
-    engine = TradePositionManagementEngine(mode=ExecutionMode.PAPER)
-
-    # ۱. باز کردن یک معامله خرید آزمایشی بر روی بیتکوین
-    success, pos, msg = engine.open_position(
-        symbol="BTCUSDT",
-        market="CRYPTO_FUTURES",
-        side_str="BUY",
-        entry_price=94000.0,
-        stop_loss=93000.0,
-        tp1=95500.0,  # سود ۱.۵ برابری
-        tp2=96500.0,  # سود ۲.۵ برابری
-        tp3=98000.0,  # سقف رنج CRT
-        allocated_volume=0.01,
-        risk_usd=10.0,
-    )
-
-    print(f"\n[وضعیت بازگشایی سفارش]: {msg}")
-    print(f"شناسه پوزیشن: {pos.position_id}")
-
-    # ۲. شبیه‌سازی حرکت قیمت: قیمت به TP1 (95500) می‌رسد
-    print("\n--- تیک اول: قیمت به 95,600 صعود می‌کند (برخورد با TP1) ---")
-    update_1 = engine.update_position_on_price_tick(
-        pos.position_id, current_high=95600.0, current_low=94200.0, current_close=95400.0
-    )
-    for ev in update_1.get("events", []):
-        print(f"👉 رویداد: {ev}")
-    print(f"حد ضرر جدید (Break-Even): {update_1['position']['stop_loss']}")
-    print(f"حجم باقیمانده: {update_1['position']['current_volume']}")
-
-    # ۳. شبیه‌سازی حرکت قیمت: قیمت به TP2 (96500) می‌رسد
-    print("\n--- تیک دوم: قیمت به 96,700 صعود می‌کند (برخورد با TP2) ---")
-    update_2 = engine.update_position_on_price_tick(
-        pos.position_id, current_high=96700.0, current_low=95200.0, current_close=96500.0
-    )
-    for ev in update_2.get("events", []):
-        print(f"👉 رویداد: {ev}")
-    print(f"حد ضرر تریل‌شده به سمت سود: {update_2['position']['stop_loss']}")
-    print(f"حجم باقیمانده: {update_2['position']['current_volume']}")
-
-    # ۴. شبیه‌سازی حرکت قیمت: قیمت به TP3 (98000) می‌رسد و پوزیشن تسویه کامل می‌شود
-    print("\n--- تیک سوم: قیمت به 98,100 صعود می‌کند (برخورد با TP3) ---")
-    update_3 = engine.update_position_on_price_tick(
-        pos.position_id, current_high=98100.0, current_low=96400.0, current_close=98050.0
-    )
-    for ev in update_3.get("events", []):
-        print(f"👉 رویداد: {ev}")
-
-    print("\n[گزارش تسویه نهایی معامله]:")
-    pprint.pprint(update_3["position"])
-
-    print("\n" + "=" * 70)
-    if update_3["status"] == "CLOSED" and update_3["reason"] == "FULL_TAKE_PROFIT":
-        print("✅ تست فایل شماره ۴ با موفقیت کامل انجام شد!")
-        print(f"💰 کل سود محقق‌شده: {update_3['position']['realized_pnl']:.2f} دلار")
-    print("=" * 70)

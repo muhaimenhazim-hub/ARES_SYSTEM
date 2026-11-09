@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 4.0 (COMPLETE DEVICE ISOLATION & TRADING PERMISSION SWITCH)
+VERSION: 5.0 (CLOUD METAAPI & BINANCE COMPATIBLE)
 ================================================================================
 """
 
@@ -50,7 +50,7 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-4 md:p-6 min-h-screen flex flex-col justify-between">
 
-    <!-- صفحه ورود و ثبت نام اختصاصی (قبل از احراز هویت) -->
+    <!-- صفحه ورود و ثبت نام اختصاصی -->
     <div id="auth-container" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b0e14]">
         <div class="card max-w-md w-full p-6 md:p-8 text-right border-gray-800 shadow-2xl">
             <div class="text-center mb-6">
@@ -70,7 +70,7 @@ HTML_TEMPLATE = """
             <div class="space-y-4 text-xs md:text-sm">
                 <div>
                     <label class="block text-gray-400 mb-1">ایمیل یا شماره موبایل:</label>
-                    <input type="text" id="auth-identifier" placeholder="مثال: 09121234567 یا user@gmail.com" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
+                    <input type="text" id="auth-identifier" placeholder="مثال: user@gmail.com" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
                 </div>
                 <div>
                     <label class="block text-gray-400 mb-1">کلمه عبور:</label>
@@ -84,9 +84,8 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- داشبورد اصلی (تنها پس از ورود کاربر نمایش داده می‌شود) -->
+    <!-- داشبورد اصلی -->
     <div id="main-dashboard" class="hidden">
-        <!-- هدر بالای داشبورد -->
         <header class="flex flex-wrap justify-between items-center mb-6 pb-4 border-b border-gray-800 gap-4">
             <div>
                 <div class="flex items-center gap-3">
@@ -94,26 +93,22 @@ HTML_TEMPLATE = """
                     <h1 class="text-xl md:text-2xl font-bold tracking-wider text-emerald-400">ARES AI TRADING SYSTEM</h1>
                     <span id="user-display-badge" class="text-xs bg-gray-800 text-gray-300 border border-gray-700 px-3 py-1 rounded-full font-mono">کاربر: ...</span>
                 </div>
-                <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال پایش اطلاعات حساب...</p>
+                <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال پایش اطلاعات حساب ابری...</p>
             </div>
             
             <div class="flex flex-wrap gap-2 items-center">
-                <!-- دکمه اجازه معامله خودکار ربات -->
                 <button id="btn-toggle-trading" onclick="toggleAutoTrading()" class="px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1.5 shadow-md">
                     <i class="fa-solid fa-play"></i> <span id="lbl-toggle-trading">شروع معامله خودکار</span>
                 </button>
                 
-                <!-- دکمه قطع ارتباط حساب -->
                 <button onclick="disconnectBroker()" class="bg-red-950/40 border border-red-800 hover:bg-red-900 text-red-300 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1">
                     <i class="fa-solid fa-unlink"></i> قطع ارتباط حساب
                 </button>
 
-                <!-- دکمه تنظیمات اکانت -->
                 <button onclick="openSettingsModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1 shadow-md shadow-blue-900/30">
                     <i class="fa-solid fa-gear"></i> تنظیمات حساب
                 </button>
 
-                <!-- خروج -->
                 <button onclick="logoutUser()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1">
                     <i class="fa-solid fa-right-from-bracket"></i> خروج
                 </button>
@@ -311,7 +306,7 @@ HTML_TEMPLATE = """
             if (!currentUser) return;
             document.getElementById('user-display-badge').innerText = `👤 کاربر: ${currentUser.identifier}`;
             fetchUserStatus();
-            setInterval(fetchUserStatus, 2000);
+            setInterval(fetchUserStatus, 2500);
         }
 
         async function fetchUserStatus() {
@@ -332,7 +327,6 @@ HTML_TEMPLATE = """
                 document.getElementById('account-id-display').innerText = data.account_info;
                 document.getElementById('broker-connected-info').innerText = data.broker_info;
 
-                // بروزرسانی دکمه اجازه معامله
                 const btnToggle = document.getElementById('btn-toggle-trading');
                 const lblToggle = document.getElementById('lbl-toggle-trading');
                 if (data.is_auto_trading) {
@@ -419,7 +413,6 @@ HTML_TEMPLATE = """
             }
         }
 
-        // بررسی لاگین اولیه کاربر در این دستگاه
         if (currentUser && currentUser.user_id) {
             document.getElementById('auth-container').classList.add('hidden');
             document.getElementById('main-dashboard').classList.remove('hidden');
@@ -461,12 +454,16 @@ async def login_api(request: Request):
 
 
 @app.get("/api/user/status")
-def get_user_status_api(x_user_id: Optional[str] = Header(None)):
+async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
     if not x_user_id:
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
 
     user_cfg = db.get_user_broker_config(x_user_id)
-    equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
+    try:
+        equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
+    except Exception:
+        equity, acc_info, broker_info, is_conn = 0.0, "در حال همگام‌سازی", "برقراری ارتباط ابری...", False
+
     summary = db.get_portfolio_summary(user_id=x_user_id)
 
     return {
