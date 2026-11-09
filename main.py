@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 10.0 (STRICT DATABASE-BACKED 3-POSITION CEILING & MT5 DISPATCH)
+VERSION: 11.0 (TURBO SPEED 1s POSITION CHECK & 5s OPPORTUNITY SCAN)
 ================================================================================
 """
 
@@ -48,7 +48,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات خودکار ARES (مدیریت سقف قطعی ۳ معامله بر پایه دیتابیس)")
+        print("🏛 راه‌اندازی ربات فوق‌سریع ARES (پایش هر ۱ ثانیه و اسکن هر ۵ ثانیه)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -63,6 +63,7 @@ class AresMasterSystem:
         self.last_scan_time: float = 0.0
 
     def manage_active_positions_fast(self):
+        """مدیریت لحظه‌ای پوزیشن‌های باز با تیک‌های سریع قیمت"""
         if not self.trade_engine.open_positions:
             return
 
@@ -119,7 +120,6 @@ class AresMasterSystem:
     def scan_for_opportunities(self):
         active_users = self.db.get_auto_trading_users()
         if not active_users:
-            print("⏱ [پایش زنده]: در انتظار فعال‌سازی دکمه شروع معامله توسط کاربر در داشبورد...", flush=True)
             return
 
         for user in active_users:
@@ -129,13 +129,11 @@ class AresMasterSystem:
             if not is_connected or equity <= 0:
                 continue
 
-            # کنترل قطعی سقف ۳ معامله مستقیماً از روی پایگاه‌داده
             active_trades_db = self.db.get_user_open_trades(user_id=user_id)
             if len(active_trades_db) >= 3:
                 continue
 
             for symbol, specs in self.SYMBOLS_SPECS.items():
-                # بررسی مجدد سقف پیش از تحلیل هر جفت‌ارز
                 current_active = self.db.get_user_open_trades(user_id=user_id)
                 if len(current_active) >= 3:
                     break
@@ -182,7 +180,7 @@ class AresMasterSystem:
                             user_id=user_id,
                         )
                         if success:
-                            print(f"\n🔥 [سیگنال تایید شد]: {symbol} {opportunity.direction} | ارسال به متاتریدر...", flush=True)
+                            print(f"\n🔥 [سیگنال تایید شد]: {symbol} {opportunity.direction} | ارسال فوری به متاتریدر...", flush=True)
                             self.db.record_new_trade(pos.to_dict(), user_id=user_id)
 
                             user_identifier = user.get("identifier", user_id)
@@ -195,26 +193,26 @@ class AresMasterSystem:
                             })
 
     def run_loop(self):
-        print("\n🚀 ناظر معاملات آماده پایش بازار و ارسال سیگنال است.\n", flush=True)
-        scan_interval = 30.0
+        print("\n🚀 ناظر هوشمند با سرعت بالا فعال شد.\n", flush=True)
+        scan_interval = 5.0  # اسکن سریع هر ۵ ثانیه
         self.last_scan_time = 0.0
 
         while True:
             try:
                 current_time = time.time()
+                # پایش پوزیشن‌های باز در هر ۱ ثانیه
                 self.manage_active_positions_fast()
 
                 if current_time - self.last_scan_time >= scan_interval:
                     self.scan_for_opportunities()
                     self.last_scan_time = current_time
 
-                time.sleep(2.0)
+                time.sleep(1.0)
 
             except KeyboardInterrupt:
-                print("\n🛑 ربات متوقف شد.", flush=True)
                 sys.exit(0)
             except Exception:
-                time.sleep(2.0)
+                time.sleep(1.0)
 
 
 if __name__ == "__main__":
