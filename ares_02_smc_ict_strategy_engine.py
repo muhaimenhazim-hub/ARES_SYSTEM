@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 02: SMC / ICT STRATEGY ENGINE (Smart Money Concepts & ICT)
-VERSION: 1.1 (FIXED DTYPE COMPATIBILITY)
+VERSION: 2.0 (PYTHON 3.12+ TIMEZONE COMPLIANT & PANDAS 2.X COMPATIBLE)
 ================================================================================
 ماموریت ماژول:
 تحلیل جامع ساختار بازار، نقدینگی، مناطق عرضه و تقاضا، شکست‌های ساختاری (BOS, CHoCH, MSS)،
@@ -12,7 +12,7 @@ VERSION: 1.1 (FIXED DTYPE COMPATIBILITY)
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
@@ -20,7 +20,6 @@ import pandas as pd
 
 @dataclass
 class SwingPoint:
-    """مشخصات یک نقطه عطف ساختاری (سوینگ)"""
     index: int
     timestamp: datetime
     price: float
@@ -31,7 +30,6 @@ class SwingPoint:
 
 @dataclass
 class LiquidityPool:
-    """استخرهای نقدینگی (BSL, SSL, EQH, EQL)"""
     pool_id: str
     pool_type: str  # 'BSL', 'SSL', 'EQH', 'EQL'
     price_level: float
@@ -42,7 +40,6 @@ class LiquidityPool:
 
 @dataclass
 class OrderBlock:
-    """بلاک سفارش نهادی (Order Block)"""
     ob_id: str
     direction: str  # 'BULLISH' یا 'BEARISH'
     top: float
@@ -56,7 +53,6 @@ class OrderBlock:
 
 @dataclass
 class SMCAnalysisResult:
-    """خروجی استاندارد موتور SMC/ICT جهت تجمیع در Master Setup Engine"""
     analysis_id: str
     symbol: str
     market: str
@@ -74,7 +70,7 @@ class SMCAnalysisResult:
     status: str = "NEUTRAL"
     confirmation_evidence: List[str] = field(default_factory=list)
     rejection_evidence: List[str] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict:
         return {
@@ -92,7 +88,7 @@ class SMCAnalysisResult:
             "fvgs": self.active_fvgs,
             "liquidity": self.liquidity_pools,
             "pricing": self.premium_discount_status,
-            "displacement_strength": self.displacement_strength,
+            "displacement_strength": round(self.displacement_strength, 2),
             "status": self.status,
             "confirmation_evidence": self.confirmation_evidence,
             "rejection_evidence": self.rejection_evidence,
@@ -119,11 +115,14 @@ class SMCICTStrategyEngine:
         low = df["low"]
         close = df["close"].shift(1)
         tr = pd.concat([high - low, (high - close).abs(), (low - close).abs()], axis=1).max(axis=1)
-        return tr.rolling(window=period, min_periods=period).mean()
+        atr = tr.rolling(window=period, min_periods=1).mean()
+        return atr.bfill().fillna(1.0)
 
     def identify_swings(self, df: pd.DataFrame) -> List[SwingPoint]:
         swings: List[SwingPoint] = []
         n = self.swing_lookback
+        if len(df) < (2 * n + 1):
+            return swings
 
         for i in range(n, len(df) - n):
             current_high = float(df["high"].iloc[i])
@@ -131,7 +130,7 @@ class SMCICTStrategyEngine:
 
             is_high = True
             for j in range(1, n + 1):
-                if df["high"].iloc[i - j] >= current_high or df["high"].iloc[i + j] > current_high:
+                if float(df["high"].iloc[i - j]) >= current_high or float(df["high"].iloc[i + j]) > current_high:
                     is_high = False
                     break
             if is_high:
@@ -153,7 +152,7 @@ class SMCICTStrategyEngine:
 
             is_low = True
             for j in range(1, n + 1):
-                if df["low"].iloc[i - j] <= current_low or df["low"].iloc[i + j] < current_low:
+                if float(df["low"].iloc[i - j]) <= current_low or float(df["low"].iloc[i + j]) < current_low:
                     is_low = False
                     break
             if is_low:
@@ -184,7 +183,7 @@ class SMCICTStrategyEngine:
         for i in range(len(highs) - 1):
             diff = abs(highs[i].price - highs[i + 1].price)
             avg_price = (highs[i].price + highs[i + 1].price) / 2.0
-            if diff / avg_price <= self.eqh_tolerance_pct:
+            if avg_price > 0 and (diff / avg_price) <= self.eqh_tolerance_pct:
                 pools.append(
                     LiquidityPool(
                         pool_id=f"EQH_{highs[i].index}_{uuid.uuid4().hex[:4]}",
@@ -206,7 +205,7 @@ class SMCICTStrategyEngine:
         for i in range(len(lows) - 1):
             diff = abs(lows[i].price - lows[i + 1].price)
             avg_price = (lows[i].price + lows[i + 1].price) / 2.0
-            if diff / avg_price <= self.eqh_tolerance_pct:
+            if avg_price > 0 and (diff / avg_price) <= self.eqh_tolerance_pct:
                 pools.append(
                     LiquidityPool(
                         pool_id=f"EQL_{lows[i].index}_{uuid.uuid4().hex[:4]}",
@@ -304,51 +303,56 @@ class SMCICTStrategyEngine:
             return obs
 
         for i in range(2, len(df) - 2):
-            atr = atr_series.iloc[i]
+            atr = float(atr_series.iloc[i])
             if pd.isna(atr) or atr <= 0:
                 continue
 
-            # Bullish OB
-            if df.iloc[i]["close"] < df.iloc[i]["open"]:
-                next_c = df.iloc[i + 1]
-                body_ratio = (next_c["close"] - next_c["open"]) / (next_c["high"] - next_c["low"] + 1e-8)
-                disp = (next_c["high"] - next_c["low"]) / atr
+            c_curr = df.iloc[i]
+            c_next = df.iloc[i + 1]
 
-                if next_c["close"] > next_c["open"] and disp >= self.displacement_atr_mult and body_ratio >= self.displacement_body_ratio:
+            # Bullish OB
+            if float(c_curr["close"]) < float(c_curr["open"]):
+                c_range = float(c_next["high"] - c_next["low"])
+                body = float(c_next["close"] - c_next["open"])
+                body_ratio = body / (c_range + 1e-8)
+                disp = c_range / atr
+
+                if body > 0 and disp >= self.displacement_atr_mult and body_ratio >= self.displacement_body_ratio:
                     ob = OrderBlock(
                         ob_id=f"BULL_OB_{i}_{uuid.uuid4().hex[:4]}",
                         direction="BULLISH",
-                        top=float(df.iloc[i]["high"]),
-                        bottom=float(df.iloc[i]["low"]),
+                        top=float(c_curr["high"]),
+                        bottom=float(c_curr["low"]),
                         timeframe="MTF",
-                        created_time=pd.to_datetime(df.iloc[i]["timestamp"]),
+                        created_time=pd.to_datetime(c_curr["timestamp"]),
                     )
                     mitigated = False
                     for k in range(i + 2, len(df)):
-                        if df.iloc[k]["low"] <= ob.bottom:
+                        if float(df.iloc[k]["low"]) <= ob.bottom:
                             mitigated = True
                             break
                     if not mitigated:
                         obs.append(ob)
 
             # Bearish OB
-            elif df.iloc[i]["close"] > df.iloc[i]["open"]:
-                next_c = df.iloc[i + 1]
-                body_ratio = (next_c["open"] - next_c["close"]) / (next_c["high"] - next_c["low"] + 1e-8)
-                disp = (next_c["high"] - next_c["low"]) / atr
+            elif float(c_curr["close"]) > float(c_curr["open"]):
+                c_range = float(c_next["high"] - c_next["low"])
+                body = float(c_next["open"] - c_next["close"])
+                body_ratio = body / (c_range + 1e-8)
+                disp = c_range / atr
 
-                if next_c["close"] < next_c["open"] and disp >= self.displacement_atr_mult and body_ratio >= self.displacement_body_ratio:
+                if body > 0 and disp >= self.displacement_atr_mult and body_ratio >= self.displacement_body_ratio:
                     ob = OrderBlock(
                         ob_id=f"BEAR_OB_{i}_{uuid.uuid4().hex[:4]}",
                         direction="BEARISH",
-                        top=float(df.iloc[i]["high"]),
-                        bottom=float(df.iloc[i]["low"]),
+                        top=float(c_curr["high"]),
+                        bottom=float(c_curr["low"]),
                         timeframe="MTF",
-                        created_time=pd.to_datetime(df.iloc[i]["timestamp"]),
+                        created_time=pd.to_datetime(c_curr["timestamp"]),
                     )
                     mitigated = False
                     for k in range(i + 2, len(df)):
-                        if df.iloc[k]["high"] >= ob.top:
+                        if float(df.iloc[k]["high"]) >= ob.top:
                             mitigated = True
                             break
                     if not mitigated:
@@ -405,6 +409,18 @@ class SMCICTStrategyEngine:
         confirmations: List[str] = []
         rejections: List[str] = []
 
+        if df_mtf is None or len(df_mtf) < 10:
+            return SMCAnalysisResult(
+                analysis_id=analysis_id,
+                symbol=symbol,
+                market=market,
+                trend_direction="RANGING",
+                timeframes_used={"MTF": timeframe_label},
+                current_market_regime="EQUILIBRIUM",
+                status="NEUTRAL",
+                rejection_evidence=["داده‌های کندلی جهت تحلیل ساختار SMC کافی نیست."],
+            )
+
         atr_series = self.calculate_atr(df_mtf)
         current_atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 1.0
 
@@ -413,7 +429,7 @@ class SMCICTStrategyEngine:
         confirmations.append(f"جهت ساختار کلی بازار: {trend}")
 
         if last_bos:
-            confirmations.append(f"رویداد شکست ساختار (BOS) معتبر در سطح {last_bos['broken_level']} ثبت شد.")
+            confirmations.append(f"رویداد شکست ساختار (BOS) در سطح {last_bos['broken_level']} ثبت شد.")
         if last_choch:
             confirmations.append(f"هشدار تغییر رفتار (CHoCH) در سطح {last_choch['broken_level']} مشاهده شد.")
 
@@ -431,7 +447,6 @@ class SMCICTStrategyEngine:
 
         pricing = self.calculate_premium_discount(df_mtf, swings)
         current_zone = pricing.get("current_zone", "EQUILIBRIUM")
-        confirmations.append(f"موقعیت قیمت در رنج معاملاتی: {current_zone}")
 
         last_candle = df_mtf.iloc[-2]
         c_range = float(last_candle["high"] - last_candle["low"])
@@ -445,7 +460,7 @@ class SMCICTStrategyEngine:
             status = "BEARISH_OPPORTUNITY"
             confirmations.append("فرصت فروش معتبر: روند نزولی، قیمت در پریمیوم و اردربلاک نزولی فعال است.")
         else:
-            rejections.append("شرایط هماهنگی روند و موقعیت قیمت در ناحیه تخفیف/گران‌قیمت برای ورود مهیا نیست.")
+            rejections.append("شرایط هماهنگی روند و موقعیت قیمت در ناحیه تخفیف/گران‌قیمت مهیا نیست.")
 
         return SMCAnalysisResult(
             analysis_id=analysis_id,
@@ -466,57 +481,3 @@ class SMCICTStrategyEngine:
             confirmation_evidence=confirmations,
             rejection_evidence=rejections,
         )
-
-
-# ==============================================================================
-# بخش تست خودکار و اعتبارسنجی زنده (کاملاً سازگار با نوع داده اعشاری)
-# ==============================================================================
-if __name__ == "__main__":
-    import pprint
-
-    print("=" * 70)
-    print("ARES AI TRADING SYSTEM — TESTING MODULE 02: SMC / ICT STRATEGY ENGINE")
-    print("=" * 70)
-
-    dates = pd.date_range("2025-01-01 00:00", periods=30, freq="15min")
-    prices = [
-        100.0, 102.0, 104.0, 103.0, 101.0,
-        105.0, 108.0, 107.0, 105.0,
-        109.0, 112.0, 110.0, 108.0,
-        104.0, 103.0, 102.0,
-        103.0, 105.0, 108.0, 111.0, 114.0,
-        113.0, 112.0, 110.0, 109.0, 108.0, 107.0, 106.0, 105.0, 104.0
-    ]
-
-    # تعیین صریح نوع داده اعشاری float64 برای تمام ستون‌های قیمت
-    df_test = pd.DataFrame({
-        "timestamp": dates,
-        "open": np.array([p - 0.5 for p in prices], dtype=np.float64),
-        "high": np.array([p + 1.2 for p in prices], dtype=np.float64),
-        "low": np.array([p - 1.0 for p in prices], dtype=np.float64),
-        "close": np.array(prices, dtype=np.float64),
-        "volume": np.array([1000 + i * 50 for i in range(30)], dtype=np.float64),
-    })
-
-    # ایجاد کندل با دیسپلیسمنت قوی جهت تشکیل اردربلاک صعودی
-    df_test.loc[14, "open"] = 103.0
-    df_test.loc[14, "close"] = 102.0
-    df_test.loc[15, "open"] = 102.5
-    df_test.loc[15, "high"] = 109.0
-    df_test.loc[15, "low"] = 102.2
-    df_test.loc[15, "close"] = 108.5
-
-    engine = SMCICTStrategyEngine()
-    result = engine.analyze_market(
-        symbol="EURUSD",
-        market="FOREX",
-        df_mtf=df_test,
-        timeframe_label="M15"
-    )
-
-    print("\n[خروجی استاندارد موتور تحلیلی SMC / ICT]:")
-    pprint.pprint(result.to_dict())
-
-    print("\n" + "=" * 70)
-    print("✅ تست فایل شماره ۲ با موفقیت کامل انجام شد! ساختار، سطوح و بلاک‌ها ارزیابی شدند.")
-    print("=" * 70)
