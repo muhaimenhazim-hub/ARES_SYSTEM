@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 8.0 (STRICT POSITION LIMIT & REAL-SYNC ENGINE)
+VERSION: 9.0 (AUTOMATED MT5 SIGNAL & POSITION DISPATCH)
 ================================================================================
 """
 
@@ -50,7 +50,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات خودکار ARES (مدیریت سخت‌گیرانه سقف ۳ پوزیشن)")
+        print("🏛 راه‌اندازی ربات خودکار ARES (ارسال زنده دستورات به متاتریدر ۵)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -61,7 +61,7 @@ class AresMasterSystem:
         self.setup_engine = MasterSetupEngine(min_rr_ratio=1.5)
 
         self.risk_engine = RiskManagementPortfolioEngine(initial_capital=100.0)
-        self.trade_engine = TradePositionManagementEngine(mode=ExecutionMode.PAPER)
+        self.trade_engine = TradePositionManagementEngine(mode=ExecutionMode.LIVE)
         self.last_scan_time: float = 0.0
 
     def manage_active_positions_fast(self):
@@ -81,9 +81,19 @@ class AresMasterSystem:
                 current_close=float(last_candle["close"]),
             )
 
+            # ارسال تغییرات SL/TP به متاتریدر در صورت وقوع Break-Even
             if update.get("events"):
                 for ev in update["events"]:
                     print(f"\n⚡ [کاربر {pos.user_id} | {pos.symbol}]: {ev}", flush=True)
+
+                if pos.is_break_even:
+                    account_config.queue_mt5_command(pos.user_id, {
+                        "action": "MODIFY",
+                        "symbol": pos.symbol,
+                        "sl": pos.stop_loss,
+                        "tp": pos.tp3,
+                        "ticket": getattr(pos, "mt5_ticket", 0)
+                    })
 
                 if pos.partial_exits:
                     last_exit = pos.partial_exits[-1]
@@ -98,15 +108,22 @@ class AresMasterSystem:
 
                 self.db.record_new_trade(pos.to_dict(), user_id=pos.user_id)
 
+            # بستن پوزیشن در صورت خروج
             if update.get("status") == "CLOSED":
                 pnl = update["position"]["realized_pnl"]
                 print(f"\n🔔 [تسویه پوزیشن {pos.symbol}]: سود/زیان = {pnl:+.2f}$", flush=True)
+                
+                account_config.queue_mt5_command(pos.user_id, {
+                    "action": "CLOSE",
+                    "symbol": pos.symbol,
+                    "ticket": getattr(pos, "mt5_ticket", 0)
+                })
                 self.db.record_new_trade(update["position"], user_id=pos.user_id)
 
     def scan_for_opportunities(self):
         active_users = self.db.get_auto_trading_users()
         if not active_users:
-            print("⏱ [پایش زنده]: در انتظار فعال‌سازی معامله توسط کاربران...", flush=True)
+            print("⏱ [پایش زنده]: در انتظار فعال‌سازی دکمه شروع معامله توسط کاربر در داشبورد...", flush=True)
             return
 
         for user in active_users:
@@ -116,13 +133,12 @@ class AresMasterSystem:
             if not is_connected or equity <= 0:
                 continue
 
-            # کنترل قطعی سقف ۳ پوزیشن هم‌زمان به ازای هر کاربر
+            # کنترل قطعی سقف ۳ معامله
             user_open_positions = [p for p in self.trade_engine.open_positions.values() if p.user_id == user_id]
             if len(user_open_positions) >= 3:
                 continue
 
             for symbol, specs in self.SYMBOLS_SPECS.items():
-                # بررسی لحظه‌ای سقف قبل از هر پوزیشن جدید (جلوگیری از باگ ۴/۳)
                 current_count = sum(1 for p in self.trade_engine.open_positions.values() if p.user_id == user_id)
                 if current_count >= 3:
                     break
@@ -169,12 +185,22 @@ class AresMasterSystem:
                             user_id=user_id,
                         )
                         if success:
-                            print(f"\n🔥 [پوزیشن مجاز باز شد]: {symbol} برای کاربر {user_id} | پوزیشن‌های فعال: {current_count + 1}/3", flush=True)
+                            print(f"\n🔥 [سیگنال تایید شد]: {symbol} {opportunity.direction} | ارسال به متاتریدر...", flush=True)
                             self.db.record_new_trade(pos.to_dict(), user_id=user_id)
 
+                            # ارسال دستور فوری به صف اکسپرت متاتریدر ۵
+                            user_identifier = user.get("identifier", user_id)
+                            account_config.queue_mt5_command(user_identifier, {
+                                "action": opportunity.direction,  # 'BUY' یا 'SELL'
+                                "symbol": symbol,
+                                "volume": risk_decision.calculated_volume,
+                                "sl": opportunity.stop_loss,
+                                "tp": opportunity.take_profit_1,
+                            })
+
     def run_loop(self):
-        print("\n🚀 ناظر معاملات آماده پایش بازار است.\n", flush=True)
-        scan_interval = 60.0
+        print("\n🚀 ناظر معاملات آماده پایش بازار و ارسال سیگنال است.\n", flush=True)
+        scan_interval = 30.0
         self.last_scan_time = 0.0
 
         while True:
