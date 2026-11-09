@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 7.0 (LTR BADGE FIX & HYBRID ZERO-COST ENGINE)
+VERSION: 8.0 (ANTI-FLICKER & STRICT ZERO-PHANTOM)
 ================================================================================
 """
 
@@ -46,13 +46,12 @@ HTML_TEMPLATE = """
         .card { background-color: #151b26; border: 1px solid #232d3f; border-radius: 0.75rem; }
         .glow-green { box-shadow: 0 0 15px rgba(16, 185, 129, 0.2); }
         .modal { background-color: rgba(0, 0, 0, 0.85); backdrop-filter: blur(6px); }
-        .ltr-num { direction: ltr; display: inline-block; }
     </style>
 </head>
 <body class="p-4 md:p-6 min-h-screen flex flex-col justify-between">
 
-    <!-- صفحه ورود و ثبت نام -->
-    <div id="auth-container" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b0e14]">
+    <!-- صفحه ورود و ثبت نام (پیش‌فرض مخفی برای جلوگیری از پرش صفحه) -->
+    <div id="auth-container" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b0e14] hidden">
         <div class="card max-w-md w-full p-6 md:p-8 text-right border-gray-800 shadow-2xl">
             <div class="text-center mb-6">
                 <div class="inline-block p-3 rounded-full bg-emerald-950/60 border border-emerald-800 mb-3">
@@ -70,7 +69,7 @@ HTML_TEMPLATE = """
             <div class="space-y-4 text-xs md:text-sm">
                 <div>
                     <label class="block text-gray-400 mb-1">ایمیل یا شماره موبایل:</label>
-                    <input type="text" id="auth-identifier" placeholder="ایمیل یا موبایل خود را بنویسید" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
+                    <input type="text" id="auth-identifier" placeholder="ایمیل یا شماره خود را وارد کنید" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
                 </div>
                 <div>
                     <label class="block text-gray-400 mb-1">کلمه عبور:</label>
@@ -84,7 +83,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- داشبورد اصلی -->
+    <!-- داشبورد اصلی (پیش‌فرض مخفی تا احراز هویت بدون پرش بررسی شود) -->
     <div id="main-dashboard" class="hidden">
         <header class="flex flex-wrap justify-between items-center mb-6 pb-4 border-b border-gray-800 gap-4">
             <div>
@@ -93,7 +92,7 @@ HTML_TEMPLATE = """
                     <h1 class="text-xl md:text-2xl font-bold tracking-wider text-emerald-400">ARES AI TRADING SYSTEM</h1>
                     <span id="user-display-badge" class="text-xs bg-gray-800 text-gray-300 border border-gray-700 px-3 py-1 rounded-full font-mono">کاربر: ...</span>
                 </div>
-                <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال بررسی حساب...</p>
+                <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال پایش اطلاعات حساب...</p>
             </div>
             
             <div class="flex flex-wrap gap-2 items-center">
@@ -119,7 +118,7 @@ HTML_TEMPLATE = """
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 md:gap-6 mb-8">
             <div class="card p-5 glow-green">
                 <div class="text-gray-400 text-sm font-medium flex justify-between">
-                    <span>موجودی واقعی حساب (Equity)</span>
+                    <span>موجودی حساب (Equity)</span>
                     <i class="fa-solid fa-wallet text-emerald-400"></i>
                 </div>
                 <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="equity-val">$0.00</div>
@@ -132,7 +131,7 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-chart-line text-blue-400"></i>
                 </div>
                 <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="daily-pnl">$0.00</div>
-                <div class="text-xs text-gray-400 mt-2">معاملات بسته شده حساب متصل</div>
+                <div class="text-xs text-gray-400 mt-2">محاسبه بر اساس معاملات بسته شده شما</div>
             </div>
 
             <div class="card p-5">
@@ -140,7 +139,7 @@ HTML_TEMPLATE = """
                     <span>پوزیشن‌های فعال</span>
                     <i class="fa-solid fa-layer-group text-purple-400"></i>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2 ltr-num" id="open-positions-count">0 / 3</div>
+                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" style="direction: ltr; text-align: right;" id="open-positions-count">0 / 3</div>
                 <div class="text-xs text-gray-400 mt-2">سقف مجاز: حداکثر ۳ پوزیشن</div>
             </div>
 
@@ -183,7 +182,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- مودال تنظیمات با اعتبارسنجی -->
+    <!-- مودال تنظیمات -->
     <div id="settings-modal" class="fixed inset-0 modal flex items-center justify-center p-4 hidden z-50">
         <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-xl w-full p-6 text-right max-h-[90vh] overflow-y-auto shadow-2xl">
             <div class="flex justify-between items-center pb-3 border-b border-gray-800">
@@ -205,15 +204,15 @@ HTML_TEMPLATE = """
             <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-gray-700/60 space-y-2.5 text-xs">
                 <h4 class="font-bold text-emerald-400 flex items-center gap-1.5"><i class="fa-solid fa-chart-line"></i> متاتریدر ۵ (فارکس و انس طلا)</h4>
                 <div>
-                    <label class="block text-gray-400 mb-1">شماره حساب دقیق متاتریدر (Login):</label>
-                    <input type="text" id="cfg-mt5-login" placeholder="شماره حساب عددی خود را تایپ کنید" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    <label class="block text-gray-400 mb-1">شماره حساب (Login):</label>
+                    <input type="text" id="cfg-mt5-login" placeholder="شماره حساب متاتریدر" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                 </div>
                 <div>
-                    <label class="block text-gray-400 mb-1">رمز عبور حساب (Password):</label>
-                    <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور حساب" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    <label class="block text-gray-400 mb-1">رمز عبور (Password):</label>
+                    <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                 </div>
                 <div>
-                    <label class="block text-gray-400 mb-1">نام دقیق سرور بروکر (Server Name):</label>
+                    <label class="block text-gray-400 mb-1">نام دقیق سرور بروکر (Server):</label>
                     <input type="text" id="cfg-mt5-server" placeholder="مثال: MetaQuotes-Demo" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
                 </div>
             </div>
@@ -241,8 +240,22 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        let currentUser = JSON.parse(localStorage.getItem('ares_user') || 'null');
+        let currentUser = null;
+        try {
+            currentUser = JSON.parse(localStorage.getItem('ares_user') || 'null');
+        } catch(e) {}
+
         let currentAuthMode = 'login';
+
+        // جلوگیری قطعی از پرش صفحه (بررسی اولیه قبل از رندر)
+        if (currentUser && currentUser.user_id) {
+            document.getElementById('main-dashboard').classList.remove('hidden');
+            document.getElementById('auth-container').classList.add('hidden');
+            initDashboard();
+        } else {
+            document.getElementById('auth-container').classList.remove('hidden');
+            document.getElementById('main-dashboard').classList.add('hidden');
+        }
 
         function switchAuthTab(mode) {
             currentAuthMode = mode;
@@ -396,7 +409,7 @@ HTML_TEMPLATE = """
             const binanceSec = document.getElementById('cfg-binance-secret').value.trim();
 
             if (!binanceKey && (!loginVal || !passVal || !serverVal)) {
-                alert("لطفاً شماره حساب متاتریدر، رمز عبور و نام سرور را به صورت کامل تایپ کنید.");
+                alert("لطفاً مشخصات حساب متاتریدر را کامل وارد کنید.");
                 return;
             }
 
@@ -420,18 +433,12 @@ HTML_TEMPLATE = """
 
             const data = await res.json();
             if (res.ok) {
-                alert("حساب با موفقیت متصل شد.");
+                alert("حساب با موفقیت تنظیم شد.");
                 closeSettingsModal();
                 fetchUserStatus();
             } else {
                 alert("خطا در ذخیره مشخصات");
             }
-        }
-
-        if (currentUser && currentUser.user_id) {
-            document.getElementById('auth-container').classList.add('hidden');
-            document.getElementById('main-dashboard').classList.remove('hidden');
-            initDashboard();
         }
     </script>
 </body>
