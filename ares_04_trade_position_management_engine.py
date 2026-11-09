@@ -2,12 +2,12 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 04: TRADE & POSITION MANAGEMENT ENGINE
-VERSION: 2.0 (MULTI-TENANT & CLOUD EXECUTION ENABLED)
+VERSION: 2.5 (MT5 TICKET TRACKING & ZERO MOCK EXECUTION)
 ================================================================================
 ماموریت ماژول:
 این ماژول مسئول اجرای سفارش‌ها، مدیریت فعال پوزیشن‌ها، ثبت حد ضرر الزامی،
-خروج‌های پله‌ای (Partial TP)، انتقال حد ضرر به نقطه سر‌به‌سر (Break-Even)
-و خروج ساختاری و زودهنگام است.
+خروج‌های پله‌ای (Partial TP)، انتقال حد ضرر به نقطه سر‌به‌سر (Break-Even)،
+ردیابی تیکت متاتریدر ۵ و تسویه دقیق معامله است.
 
 اصول قطعی و غیرقابل تغییر حفظ شده:
 - هیچ معامله‌ای بدون ثبت قطعی Stop Loss باز نخواهد ماند.
@@ -61,7 +61,7 @@ class PartialExitRecord:
 
 @dataclass
 class ManagedPosition:
-    """ساختار داده پوزیشن فعال و تحت مدیریت ARES"""
+    """ساختار داده پوزیشن فعال و تحت مدیریت ARES با پشتیبانی از تیکت متاتریدر ۵"""
     position_id: str
     symbol: str
     market: str
@@ -76,6 +76,7 @@ class ManagedPosition:
     tp3: float
     risk_amount_usd: float
     user_id: str = "default"
+    mt5_ticket: int = 0
     is_break_even: bool = False
     tp1_hit: bool = False
     tp2_hit: bool = False
@@ -92,6 +93,7 @@ class ManagedPosition:
         return {
             "position_id": self.position_id,
             "user_id": self.user_id,
+            "mt5_ticket": self.mt5_ticket,
             "symbol": self.symbol,
             "market": self.market,
             "side": self.side.value,
@@ -124,7 +126,7 @@ class TradePositionManagementEngine:
 
     def __init__(
         self,
-        mode: ExecutionMode = ExecutionMode.PAPER,
+        mode: ExecutionMode = ExecutionMode.LIVE,
         tp1_ratio: float = 0.30,  # ۳۰ درصد خروج در تارگت ۱
         tp2_ratio: float = 0.30,  # ۳۰ درصد خروج در تارگت ۲
         tp3_ratio: float = 0.40,  # ۴۰ درصد خروج در تارگت ۳
@@ -151,6 +153,7 @@ class TradePositionManagementEngine:
         allocated_volume: float,
         risk_usd: float,
         user_id: str = "default",
+        mt5_ticket: int = 0,
     ) -> Tuple[bool, Optional[ManagedPosition], str]:
         """
         ایجاد و اعتبارسنجی پوزیشن جدید همراه با الزام ثبت حد ضرر (تفکیک به ازای هر کاربر)
@@ -174,6 +177,7 @@ class TradePositionManagementEngine:
         new_pos = ManagedPosition(
             position_id=pos_id,
             user_id=user_id,
+            mt5_ticket=mt5_ticket,
             symbol=symbol,
             market=market,
             side=side,
@@ -190,7 +194,7 @@ class TradePositionManagementEngine:
         )
 
         self.open_positions[pos_id] = new_pos
-        return True, new_pos, f"پوزیشن {pos_id} با موفقیت در حالت {self.mode.value} باز شد."
+        return True, new_pos, f"پوزیشن {pos_id} با موفقیت در حالت {self.mode.value} ایجاد شد."
 
     def update_position_on_price_tick(
         self,

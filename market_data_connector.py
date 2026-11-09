@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 1: UNIFIED MULTI-MARKET DATA CONNECTOR (Crypto & Forex & Indices)
-VERSION: 4.0 (METAAPI CLOUD ENGINE + BINANCE FUTURES DIRECT FEED)
+VERSION: 5.0 (HIGH-SPEED ZERO-DEPENDENCY CLOUD FEED & BINANCE FUTURES)
 ================================================================================
 """
 
@@ -16,8 +16,6 @@ import ccxt
 import numpy as np
 import pandas as pd
 
-import account_config
-
 
 class BinanceFuturesConnector:
     """کانکتور رسمی بازار کریپتو فیوچرز بایننس"""
@@ -28,6 +26,7 @@ class BinanceFuturesConnector:
         self.exchange = ccxt.binance({
             "options": {"defaultType": "future"},
             "enableRateLimit": True,
+            "timeout": 7000,
         })
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
@@ -42,13 +41,12 @@ class BinanceFuturesConnector:
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = df[col].astype(np.float64)
             return df
-        except Exception as e:
-            print(f"❌ خطا در دریافت داده کریپتو {symbol}: {e}")
+        except Exception:
             return None
 
 
 class MT5ForexConnector:
-    """کانکتور رسمی بازار فارکس و طلا با MetaApi Cloud و شبکه بک‌آپ پرسرعت"""
+    """کانکتور زنده و پرسرعت انس طلا، فارکس و شاخص‌ها بر بستر کلود جهانی بدون نیاز به MetaApi"""
 
     TIMEFRAME_MAP = {
         "1h": "1h",
@@ -77,42 +75,10 @@ class MT5ForexConnector:
     }
 
     def __init__(self):
-        self.token = account_config.META_API_TOKEN
-        self.connected = True
-        print("🌐 دیتای زنده فارکس و انس طلا (XAUUSD) بر بستر سرورهای ابری فعال شد.")
-
-    def _fetch_metaapi_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
-        """تلاش اول: دریافت دیتا از حساب متصل در MetaApi"""
-        if not account_config._METAAPI_ACCOUNT_CACHE:
-            return None
-
-        # گرفتن اولین اکانت ثبت شده در کش
-        account_id = next(iter(account_config._METAAPI_ACCOUNT_CACHE.values()))
-        clean_sym = symbol.replace(" ", "").upper()
-        if "XAU" in clean_sym or "GOLD" in clean_sym:
-            clean_sym = "XAUUSD"
-
-        tf = self.TIMEFRAME_MAP.get(timeframe, "15m")
-        url = f"https://mt-market-data-client-api-v1.agiliumtrade.agiliumtrade.ai/users/current/accounts/{account_id}/historical-market-data/symbols/{clean_sym}/timeframes/{tf}/candles?limit={limit}"
-        headers = {"auth-token": self.token, "User-Agent": "AresTradingSystem/4.0"}
-
-        try:
-            req = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                candles = json.loads(resp.read().decode())
-                if candles and len(candles) >= 15:
-                    df = pd.DataFrame(candles)
-                    df["timestamp"] = pd.to_datetime(df["time"])
-                    for col in ["open", "high", "low", "close", "volume"]:
-                        if col in df.columns:
-                            df[col] = df[col].astype(np.float64)
-                    return df[["timestamp", "open", "high", "low", "close", "volume"]]
-        except Exception:
-            return None
-        return None
+        print("🌐 دیتای زنده فارکس، انس طلا (XAUUSD) و شاخص‌ها بر بستر مستقل کلود فعال شد.")
 
     def _fetch_cloud_ohlcv(self, standard_symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
-        """تلاش دوم: دریافت زنده و بدون وقفه کندل‌های طلا و فارکس بدون نیاز به پروکسی"""
+        """دریافت زنده و بدون وقفه کندل‌ها از سرورهای جهانی بدون تحریم و بدون افت سرعت"""
         clean_sym = standard_symbol.upper().replace(" ", "").replace("/", "").replace(".", "")
         cloud_sym = self.SYMBOL_MAP.get(standard_symbol, self.SYMBOL_MAP.get(clean_sym, f"{clean_sym}=X"))
 
@@ -120,22 +86,31 @@ class MT5ForexConnector:
         fetch_range = range_map.get(timeframe, "5d")
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{cloud_sym}?interval={timeframe}&range={fetch_range}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        )
 
         try:
-            with urllib.request.urlopen(req, timeout=5.0) as response:
+            with urllib.request.urlopen(req, timeout=6.0) as response:
                 payload = json.loads(response.read().decode())
+                if not payload.get("chart", {}).get("result"):
+                    return self._fetch_gold_backup(timeframe, limit) if "XAU" in clean_sym or "GOLD" in clean_sym else None
+
                 result = payload["chart"]["result"][0]
-                timestamps = result["timestamp"]
-                quote = result["indicators"]["quote"][0]
+                timestamps = result.get("timestamp", [])
+                quote = result.get("indicators", {}).get("quote", [{}])[0]
+
+                if not timestamps or not quote.get("close"):
+                    return None
 
                 df = pd.DataFrame({
                     "timestamp": pd.to_datetime(timestamps, unit="s"),
-                    "open": quote["open"],
-                    "high": quote["high"],
-                    "low": quote["low"],
-                    "close": quote["close"],
-                    "volume": quote.get("volume", [0] * len(timestamps)),
+                    "open": quote.get("open", [0]*len(timestamps)),
+                    "high": quote.get("high", [0]*len(timestamps)),
+                    "low": quote.get("low", [0]*len(timestamps)),
+                    "close": quote.get("close", [0]*len(timestamps)),
+                    "volume": quote.get("volume", [0]*len(timestamps)),
                 }).dropna()
 
                 if len(df) < 15:
@@ -151,9 +126,9 @@ class MT5ForexConnector:
             return None
 
     def _fetch_gold_backup(self, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
-        """پشتیبان آنی قیمت انس طلا از استخر نقدینگی بایننس (PAXG)"""
+        """پشتیبان آنی قیمت انس طلا از استخر نقدینگی بایننس (PAXG) در صورت نوسانات شدید اینترنت"""
         try:
-            ex = ccxt.binance({"options": {"defaultType": "future"}, "enableRateLimit": True})
+            ex = ccxt.binance({"options": {"defaultType": "future"}, "enableRateLimit": True, "timeout": 5000})
             raw = ex.fetch_ohlcv("PAXG/USDT:USDT", timeframe=timeframe, limit=limit)
             if not raw or len(raw) < 15:
                 return None
@@ -166,12 +141,6 @@ class MT5ForexConnector:
             return None
 
     def fetch_ohlcv(self, standard_symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
-        # ۱. ابتدا بررسی دریافت مستقیم از متاتریدر متصل کاربر
-        df = self._fetch_metaapi_ohlcv(standard_symbol, timeframe, limit)
-        if df is not None:
-            return df
-
-        # ۲. در غیر این صورت، دریافت از فید اختصاصی گلوبال ابری
         return self._fetch_cloud_ohlcv(standard_symbol, timeframe, limit)
 
 
