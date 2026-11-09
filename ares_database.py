@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 3.0 (MULTI-TENANT USER AUTHENTICATION & ZERO MOCK DATA)
+VERSION: 3.5 (MT5 TICKET PERSISTENCE & CONCURRENT WAL ENGINE)
 ================================================================================
 """
 
@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 class AresDatabaseManager:
     """
-    مدیر پایگاه داده چندکاربره سیستم ARES مجهز به احراز هویت و ایزوله‌سازی اکانت‌ها
+    مدیر پایگاه داده چندکاربره سیستم ARES مجهز به احراز هویت، ایزوله‌سازی اکانت‌ها و ثبت تیکت MT5
     """
 
     def __init__(self, db_path: str = "ares_trading.db"):
@@ -24,17 +24,18 @@ class AresDatabaseManager:
         self.clean_all_mock_data()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(self.db_path, timeout=20.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
 
     def _initialize_database(self):
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # جدول کاربران
+            # ۱. جدول کاربران
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
@@ -44,11 +45,11 @@ class AresDatabaseManager:
                 );
             """)
 
-            # جدول تنظیمات اختصاصی حساب هر کاربر
+            # ۲. جدول تنظیمات اختصاصی بروکر هر کاربر
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_broker_configs (
                     user_id TEXT PRIMARY KEY,
-                    trading_mode TEXT DEFAULT 'PAPER',
+                    trading_mode TEXT DEFAULT 'LIVE',
                     binance_api_key TEXT DEFAULT '',
                     binance_secret_key TEXT DEFAULT '',
                     mt5_login TEXT DEFAULT '',
@@ -60,11 +61,12 @@ class AresDatabaseManager:
                 );
             """)
 
-            # جدول معاملات
+            # ۳. جدول معاملات مجهز به ستون شماره تیکت متاتریدر ۵
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     trade_id VARCHAR(64) PRIMARY KEY,
                     user_id TEXT DEFAULT 'default',
+                    mt5_ticket INTEGER DEFAULT 0,
                     symbol VARCHAR(20) NOT NULL,
                     market VARCHAR(30) NOT NULL,
                     side VARCHAR(10) NOT NULL,
@@ -87,7 +89,13 @@ class AresDatabaseManager:
                 );
             """)
 
-            # جدول خروج‌های پله‌ای
+            # افزودن امن ستون mt5_ticket در صورت موجود نبودن در دیتابیس فعلی
+            try:
+                cursor.execute("ALTER TABLE trades ADD COLUMN mt5_ticket INTEGER DEFAULT 0;")
+            except sqlite3.OperationalError:
+                pass  # ستون از قبل وجود دارد
+
+            # ۴. جدول خروج‌های پله‌ای
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS partial_exits (
                     exit_id VARCHAR(64) PRIMARY KEY,
@@ -101,7 +109,7 @@ class AresDatabaseManager:
                 );
             """)
 
-            # جدول ثبت فرصت‌ها
+            # ۵. جدول ثبت ارزیابی فرصت‌ها
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS setups_log (
                     setup_id VARCHAR(64) PRIMARY KEY,
@@ -125,7 +133,6 @@ class AresDatabaseManager:
         return hashlib.sha256(password.strip().encode()).hexdigest()
 
     def register_user(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
-        """ثبت‌نام کاربر جدید با شماره موبایل یا ایمیل"""
         clean_id = identifier.strip().lower()
         if not clean_id or len(password.strip()) < 4:
             return None
@@ -148,7 +155,6 @@ class AresDatabaseManager:
             return None
 
     def authenticate_user(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
-        """ورود کاربر به سیستم"""
         clean_id = identifier.strip().lower()
         pw_hash = self._hash_pw(password)
         with self._get_connection() as conn:
@@ -161,7 +167,6 @@ class AresDatabaseManager:
             return dict(row) if row else None
 
     def get_user_broker_config(self, user_id: str) -> Dict[str, Any]:
-        """دریافت کانفیگ اختصاصی فقط برای کاربر مشخص‌شده"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM user_broker_configs WHERE user_id = ?;", (user_id,))
@@ -170,7 +175,7 @@ class AresDatabaseManager:
                 return dict(row)
             return {
                 "user_id": user_id,
-                "trading_mode": "PAPER",
+                "trading_mode": "LIVE",
                 "binance_api_key": "",
                 "binance_secret_key": "",
                 "mt5_login": "",
@@ -180,7 +185,6 @@ class AresDatabaseManager:
             }
 
     def save_user_broker_config(self, user_id: str, cfg: Dict[str, Any]):
-        """ذخیره تنظیمات بروکر اختصاصی برای هر کاربر"""
         now = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -199,7 +203,7 @@ class AresDatabaseManager:
                     updated_at = excluded.updated_at;
             """, (
                 user_id,
-                cfg.get("trading_mode", "PAPER"),
+                cfg.get("trading_mode", "LIVE"),
                 cfg.get("binance_api_key", "").strip(),
                 cfg.get("binance_secret_key", "").strip(),
                 str(cfg.get("mt5_login", "")).strip(),
@@ -211,7 +215,6 @@ class AresDatabaseManager:
             conn.commit()
 
     def toggle_auto_trading(self, user_id: str) -> bool:
-        """فعال‌سازی یا توقف معامله خودکار برای اکانت کاربر"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT is_auto_trading FROM user_broker_configs WHERE user_id = ?;", (user_id,))
@@ -222,7 +225,6 @@ class AresDatabaseManager:
             return bool(new_val)
 
     def disconnect_broker(self, user_id: str):
-        """قطع ارتباط کامل حساب متاتریدر و صرافی برای کاربر جاری"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -233,14 +235,17 @@ class AresDatabaseManager:
             conn.commit()
 
     def get_auto_trading_users(self) -> List[Dict[str, Any]]:
-        """لیست کاربرانی که دکمه شروع معامله را روشن کرده‌اند"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM user_broker_configs WHERE is_auto_trading = 1;")
+            cursor.execute("""
+                SELECT u.user_id, u.identifier, c.is_auto_trading, c.trading_mode, c.mt5_login 
+                FROM user_broker_configs c
+                JOIN users u ON c.user_id = u.user_id
+                WHERE c.is_auto_trading = 1;
+            """)
             return [dict(r) for r in cursor.fetchall()]
 
     def clean_all_mock_data(self):
-        """تخلیه قطعی تمام دیتای فیک قدیمی"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -251,18 +256,24 @@ class AresDatabaseManager:
             pass
 
     def record_new_trade(self, pos_data: Dict[str, Any], user_id: str = "default"):
+        targets = pos_data.get("targets", {})
+        tp1 = targets.get("tp1", pos_data.get("tp1", 0.0))
+        tp2 = targets.get("tp2", pos_data.get("tp2", 0.0))
+        tp3 = targets.get("tp3", pos_data.get("tp3", 0.0))
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO trades (
-                    trade_id, user_id, symbol, market, side, entry_price, initial_volume,
+                    trade_id, user_id, mt5_ticket, symbol, market, side, entry_price, initial_volume,
                     current_volume, stop_loss, initial_stop_loss, tp1, tp2, tp3,
                     risk_amount_usd, realized_pnl, total_fees, is_break_even,
                     status, exit_reason, opened_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, (
                 pos_data["position_id"],
                 user_id,
+                int(pos_data.get("mt5_ticket", 0)),
                 pos_data["symbol"],
                 pos_data["market"],
                 pos_data["side"],
@@ -270,10 +281,10 @@ class AresDatabaseManager:
                 pos_data["initial_volume"],
                 pos_data["current_volume"],
                 pos_data["stop_loss"],
-                pos_data["initial_stop_loss"],
-                pos_data["targets"]["tp1"],
-                pos_data["targets"]["tp2"],
-                pos_data["targets"]["tp3"],
+                pos_data.get("initial_stop_loss", pos_data["stop_loss"]),
+                tp1,
+                tp2,
+                tp3,
                 pos_data["risk_amount_usd"],
                 pos_data.get("realized_pnl", 0.0),
                 pos_data.get("total_fees_paid", 0.0),
@@ -327,7 +338,6 @@ class AresDatabaseManager:
             conn.commit()
 
     def get_portfolio_summary(self, user_id: Optional[str] = None) -> Dict[str, Any]:
-        """گزارش مالی تفکیک‌شده به ازای هر کاربر"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
