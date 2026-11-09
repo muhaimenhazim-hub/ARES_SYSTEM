@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 03: MASTER SETUP ENGINE
-VERSION: 1.1 (FIXED TYPING IMPORTS)
+VERSION: 2.0 (PYTHON 3.12+ COMPLIANT & 5-DECIMAL MULTI-ASSET PRECISION)
 ================================================================================
 ماموریت ماژول:
 این ماژول مغز تصمیم‌گیری استراتژیک سیستم ARES است.
@@ -18,8 +18,8 @@ VERSION: 1.1 (FIXED TYPING IMPORTS)
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple  # Tuple اضافه شد
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
@@ -45,7 +45,7 @@ class SetupOpportunity:
     status: str  # 'APPROVED', 'REJECTED'
     rejection_reason: Optional[str] = None
     confirmations: List[str] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict:
         return {
@@ -55,11 +55,11 @@ class SetupOpportunity:
             "direction": self.direction,
             "setup_name": self.setup_name,
             "pricing": {
-                "entry_price": round(self.entry_price, 4),
-                "stop_loss": round(self.stop_loss, 4),
-                "take_profit_1": round(self.take_profit_1, 4),
-                "take_profit_2": round(self.take_profit_2, 4),
-                "take_profit_3": round(self.take_profit_3, 4),
+                "entry_price": round(self.entry_price, 5),
+                "stop_loss": round(self.stop_loss, 5),
+                "take_profit_1": round(self.take_profit_1, 5),
+                "take_profit_2": round(self.take_profit_2, 5),
+                "take_profit_3": round(self.take_profit_3, 5),
                 "risk_reward_ratio": round(self.risk_reward_ratio, 2),
             },
             "scoring": {
@@ -299,7 +299,7 @@ class MasterSetupEngine:
         ref_range = crt_result_dict.get("reference_range", {})
 
         if direction == "BUY":
-            entry_price = retest_zone.get("entry_high", current_market_price) if retest_zone else current_market_price
+            entry_price = float(retest_zone.get("entry_high", current_market_price)) if retest_zone else float(current_market_price)
             stop_loss = float(crt_result_dict.get("invalidation_price", entry_price * 0.99))
             risk_dist = entry_price - stop_loss
             if risk_dist <= 0:
@@ -308,10 +308,10 @@ class MasterSetupEngine:
 
             tp1 = entry_price + (risk_dist * 1.5)
             tp2 = entry_price + (risk_dist * 2.5)
-            tp3 = ref_range.get("high", entry_price + (risk_dist * 4.0))
+            tp3 = float(ref_range.get("high", entry_price + (risk_dist * 4.0)))
 
         elif direction == "SELL":
-            entry_price = retest_zone.get("entry_low", current_market_price) if retest_zone else current_market_price
+            entry_price = float(retest_zone.get("entry_low", current_market_price)) if retest_zone else float(current_market_price)
             stop_loss = float(crt_result_dict.get("invalidation_price", entry_price * 1.01))
             risk_dist = stop_loss - entry_price
             if risk_dist <= 0:
@@ -320,7 +320,7 @@ class MasterSetupEngine:
 
             tp1 = entry_price - (risk_dist * 1.5)
             tp2 = entry_price - (risk_dist * 2.5)
-            tp3 = ref_range.get("low", entry_price - (risk_dist * 4.0))
+            tp3 = float(ref_range.get("low", entry_price - (risk_dist * 4.0)))
         else:
             return SetupOpportunity(
                 opportunity_id=opp_id,
@@ -342,7 +342,8 @@ class MasterSetupEngine:
                 rejection_reason="جهت قطعی BUY یا SELL توسط موتورهای پایه صادر نشده است.",
             )
 
-        rr_ratio = abs(tp1 - entry_price) / abs(entry_price - stop_loss)
+        sl_distance = abs(entry_price - stop_loss)
+        rr_ratio = (abs(tp1 - entry_price) / sl_distance) if sl_distance > 0 else 0.0
 
         if rr_ratio < self.min_rr_ratio:
             return SetupOpportunity(
@@ -389,9 +390,6 @@ class MasterSetupEngine:
         )
 
 
-# ==============================================================================
-# تست خودکار یکپارچه
-# ==============================================================================
 if __name__ == "__main__":
     import pprint
 
