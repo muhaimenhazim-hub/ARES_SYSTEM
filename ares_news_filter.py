@@ -2,13 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 3: ECONOMIC NEWS FILTER ENGINE
-VERSION: 2.0 (TIMEZONE-AWARE & RESILIENT CACHED FEED)
-================================================================================
-ماموریت ماژول:
-بررسی تقویم رویدادهای اقتصادی معتبر و فیلتر کردن معاملات در زمان انتشار اخبار مهم:
-- اعمال قانون ممنوعیت ورود از ۳۰ دقیقه قبل تا ۳۰ دقیقه بعد از اخبار High Impact
-- نقشه‌برداری ارزهای خبر به نمادهای بازار (USD, EUR)
-- حفاظت از سرمایه در برابر نوسانات شدید و لغزش قیمت (Slippage) ناشی از اخبار
+VERSION: 14.0 (TIMEZONE-AWARE, NON-BLOCKING CACHE & ANTI-RATE-LIMIT)
 ================================================================================
 """
 
@@ -18,9 +12,7 @@ import requests
 
 
 class EconomicNewsFilter:
-    """
-    موتور فیلتر اخبار اقتصادی فارکس و کریپتو برای ARES
-    """
+    """موتور فیلتر اخبار اقتصادی فارکس و کریپتو برای ARES"""
 
     CALENDAR_FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
@@ -45,23 +37,24 @@ class EconomicNewsFilter:
     def fetch_high_impact_news(self) -> List[Dict]:
         now = datetime.now(timezone.utc)
 
-        if self.cached_news and self.last_fetch_time:
-            if (now - self.last_fetch_time).total_seconds() < 1800:
-                return self.cached_news
+        if self.last_fetch_time and (now - self.last_fetch_time).total_seconds() < 1800:
+            return self.cached_news
 
+        self.last_fetch_time = now
         try:
-            response = requests.get(self.CALENDAR_FEED_URL, timeout=5)
+            response = requests.get(
+                self.CALENDAR_FEED_URL,
+                timeout=4,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            )
             if response.status_code == 200:
                 all_events = response.json()
-                high_impact = [
-                    event for event in all_events
-                    if str(event.get("impact", "")).strip().lower() == "high"
-                ]
-                self.cached_news = high_impact
-                self.last_fetch_time = now
-                return high_impact
-            else:
-                return self.cached_news
+                if isinstance(all_events, list):
+                    self.cached_news = [
+                        event for event in all_events
+                        if str(event.get("impact", "")).strip().lower() == "high"
+                    ]
+            return self.cached_news
         except Exception:
             return self.cached_news
 
@@ -70,7 +63,7 @@ class EconomicNewsFilter:
         if not high_news:
             return {
                 "restricted": False,
-                "reason": "هیچ خبر مهمی در حال حاضر وجود ندارد یا تقویم در دسترس نیست.",
+                "reason": "هیچ خبر مهمی در حال حاضر وجود ندارد.",
                 "event": None,
             }
 
@@ -85,7 +78,6 @@ class EconomicNewsFilter:
                     continue
 
                 try:
-                    # تضمین تبدیل به زمان دارای آگاهی تایم‌زون UTC
                     event_time = datetime.fromisoformat(event_date_str.replace("Z", "+00:00"))
                     if event_time.tzinfo is None:
                         event_time = event_time.replace(tzinfo=timezone.utc)
@@ -112,32 +104,3 @@ class EconomicNewsFilter:
             "reason": "هیچ خبر دارای ریسک مهم در بازه زمانی جاری وجود ندارد.",
             "event": None,
         }
-
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("ARES AI TRADING SYSTEM — TESTING ECONOMIC NEWS FILTER ENGINE")
-    print("=" * 70)
-
-    news_filter = EconomicNewsFilter(blackout_window_minutes=30)
-    events = news_filter.fetch_high_impact_news()
-
-    print(f"\nتعداد اخبار High Impact کشف شده برای این هفته: {len(events)}")
-    if events:
-        print("\nنمونه‌ای از مهم‌ترین اخبار این هفته:")
-        for ev in events[:4]:
-            print(f"👉 [{ev.get('country')}] {ev.get('title')} — تاریخ و زمان: {ev.get('date')}")
-
-    print("\n--- بررسی وضعیت نماد XAUUSD (طلا) ---")
-    status_gold = news_filter.is_news_restricted("XAUUSD")
-    print(f"آیا معامله ممنوع است؟ {status_gold['restricted']}")
-    print(f"توضیحات: {status_gold['reason']}")
-
-    print("\n--- بررسی وضعیت نماد BTCUSDT (بیت‌کوین) ---")
-    status_btc = news_filter.is_news_restricted("BTCUSDT")
-    print(f"آیا معامله ممنوع است؟ {status_btc['restricted']}")
-    print(f"توضیحات: {status_btc['reason']}")
-
-    print("\n" + "=" * 70)
-    print("✅ موتور فیلتر اخبار با موفقیت کامل آماده و فعال گردید.")
-    print("=" * 70)

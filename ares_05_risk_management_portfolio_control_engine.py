@@ -2,13 +2,13 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 05: RISK MANAGEMENT & PORTFOLIO CONTROL ENGINE
-VERSION: 2.0 (SEAMLESS CAPITAL SYNC & DYNAMIC MICROLOT SIZING)
+VERSION: 14.0 (PYTHON 3.12+ TIMEZONE COMPLIANT & SAFE MARGIN CAPS)
 ================================================================================
 """
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
@@ -40,7 +40,7 @@ class RiskGateDecision:
     required_margin_usd: float
     rejection_reasons: List[str] = field(default_factory=list)
     approvals: List[str] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict:
         return {
@@ -59,9 +59,7 @@ class RiskGateDecision:
 
 
 class RiskManagementPortfolioEngine:
-    """
-    موتور مرکزی مدیریت ریسک و سرمایه ARES
-    """
+    """موتور مرکزی مدیریت ریسک و سرمایه ARES"""
 
     def __init__(
         self,
@@ -94,7 +92,6 @@ class RiskManagementPortfolioEngine:
         self.is_system_halted: bool = False
         self.halt_reason: Optional[str] = None
 
-    # تطبیق دوگانه current_capital و current_equity جهت رفع باگ عدم اعمال موجودی زنده
     @property
     def current_capital(self) -> float:
         return self._current_equity
@@ -123,7 +120,7 @@ class RiskManagementPortfolioEngine:
         dd_pct = ((self.peak_equity - self._current_equity) / self.peak_equity) * 100.0 if self.peak_equity > 0 else 0.0
         if dd_pct >= self.max_drawdown_pct:
             self.is_system_halted = True
-            self.halt_reason = f"افت سرمایه بحرانی ({dd_pct:.2f}٪) فراتر از سقف مجاز {self.max_drawdown_pct}٪ رخ داد. ورود موقتاً متوقف شد."
+            self.halt_reason = f"افت سرمایه بحرانی ({dd_pct:.2f}٪) فراتر از سقف مجاز {self.max_drawdown_pct}٪ رخ داد."
 
     def calculate_position_size(
         self,
@@ -132,7 +129,6 @@ class RiskManagementPortfolioEngine:
         risk_usd: float,
         specs: ContractSpecs,
     ) -> Tuple[float, float, float]:
-        """محاسبه دقیق علمی حجم معامله متناسب با گام نماد و لوریج متاتریدر/بایننس"""
         loss_per_unit = abs(entry_price - stop_loss_price) * specs.contract_size
         if loss_per_unit <= 0:
             return specs.min_volume, 0.0, 0.0
@@ -141,7 +137,7 @@ class RiskManagementPortfolioEngine:
 
         step = specs.volume_step
         if step > 0:
-            rounded_volume = np.round(raw_volume / step) * step
+            rounded_volume = np.floor(raw_volume / step) * step
             rounded_volume = round(rounded_volume, 4)
         else:
             rounded_volume = round(raw_volume, 4)
@@ -196,7 +192,6 @@ class RiskManagementPortfolioEngine:
                 rejection_reasons=[f"سقف زیان روزانه ({self.max_daily_loss_pct}٪) فعال شد."],
             )
 
-        # درصد ریسک بر مبنای امتیاز ستاپ هوش مصنوعی
         suggested_risk = opportunity.get("scoring", {}).get("suggested_risk_pct", 1.0)
         final_risk_pct = self.throttled_risk_pct if daily_loss_pct >= self.loss_throttle_threshold_pct else suggested_risk
         risk_usd = (self._current_equity * final_risk_pct) / 100.0
@@ -214,7 +209,7 @@ class RiskManagementPortfolioEngine:
         if margin > (self._current_equity * 0.90):
             rejections.append("مارجین سفارش از سقف مجاز ۹۰٪ سرمایه آزاد بالاتر است.")
 
-        is_approved = (len(rejections) == 0)
+        is_approved = len(rejections) == 0
         if is_approved:
             approvals.append("معامله از تمام فیلترهای کنترل ریسک با موفقیت عبور کرد.")
 

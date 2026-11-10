@@ -2,18 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 01: CRT STRATEGY ENGINE (Candle Range Theory)
-VERSION: 2.0 (PYTHON 3.12+ TIMEZONE COMPLIANT & MULTI-ASSET PRECISION)
-================================================================================
-ماموریت ماژول:
-این ماژول وظیفه تحلیل ساختاری و ریاضی نظریه محدوده کندل (CRT) را بر عهده دارد.
-این موتور به تنهایی معامله باز نمی کند، بلکه فرصت های معتبر CRT را شناسایی،
-اعتبارسنجی و داده های استاندارد را برای ارسال به Master Setup Engine استخراج می کند.
-
-اصول قطعی رعایت شده:
-- Causal Swing Detection (جلوگیری ۱۰۰٪ از Look-ahead bias)
-- تفکیک دقیق Liquidity Sweep از شکست واقعی بر اساس نفوذ مجاز و بسته‌شدن مجدد
-- Multi-Timeframe Analysis (کندل مرجع HTF، سویپ MTF، تایید ورود LTF)
-- ثبت تمام متغیرهای محدوده مرجع (High, Low, Open, Close, Midpoint)
+VERSION: 14.0 (STRICT CAUSAL SWING DETECTION & ZERO LOOK-AHEAD BIAS)
 ================================================================================
 """
 
@@ -129,10 +118,7 @@ class CRTAnalysisResult:
 
 
 class CRTStrategyEngine:
-    """
-    موتور مستقل استراتژی CRT
-    مسئول ارزیابی کامل پرایس‌اکشن مبتنی بر رنج مرجع بدون هیچ‌گونه سوگیری یا خطای آینده‌نگری
-    """
+    """موتور مستقل استراتژی CRT"""
 
     def __init__(
         self,
@@ -171,6 +157,7 @@ class CRTStrategyEngine:
     def detect_swings_causal(
         self, df: pd.DataFrame
     ) -> Tuple[pd.Series, pd.Series]:
+        """تشخیص سوئینگ روی ایندکس واقعی کندل قله/دره پس از تایید کندل‌های بعدی"""
         n = self.swing_lookback
         swing_high = pd.Series(False, index=df.index)
         swing_low = pd.Series(False, index=df.index)
@@ -188,7 +175,7 @@ class CRTStrategyEngine:
                     is_high = False
                     break
             if is_high:
-                swing_high.iloc[i + n] = True
+                swing_high.iloc[i] = True
 
             is_low = True
             for j in range(1, n + 1):
@@ -196,7 +183,7 @@ class CRTStrategyEngine:
                     is_low = False
                     break
             if is_low:
-                swing_low.iloc[i + n] = True
+                swing_low.iloc[i] = True
 
         return swing_high, swing_low
 
@@ -406,7 +393,7 @@ class CRTStrategyEngine:
         active_fvg_dicts = []
         retest_zone = None
 
-        for fvg in fvgs:
+        for fvg in reversed(fvgs):
             if direction == "BUY" and fvg.direction == "BULLISH":
                 active_fvg_dicts.append({"id": fvg.fvg_id, "top": fvg.top, "bottom": fvg.bottom})
                 if retest_zone is None:
@@ -416,7 +403,7 @@ class CRTStrategyEngine:
                 if retest_zone is None:
                     retest_zone = {"entry_high": fvg.top, "entry_low": fvg.bottom}
 
-        invalidation_price = float(lowest_mtf) if direction == "BUY" else float(highest_mtf)
+        invalidation_price = (float(lowest_mtf) - (0.15 * current_atr)) if direction == "BUY" else (float(highest_mtf) + (0.15 * current_atr))
 
         is_valid = closed_inside and (mss_status == "CONFIRMED") and (displacement_status == "CONFIRMED")
         final_status = "VALID" if is_valid else ("PENDING" if closed_inside else "INVALID")

@@ -2,11 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 02: SMC / ICT STRATEGY ENGINE (Smart Money Concepts & ICT)
-VERSION: 2.0 (PYTHON 3.12+ TIMEZONE COMPLIANT & PANDAS 2.X COMPATIBLE)
-================================================================================
-ماموریت ماژول:
-تحلیل جامع ساختار بازار، نقدینگی، مناطق عرضه و تقاضا، شکست‌های ساختاری (BOS, CHoCH, MSS)،
-نواحی Premium/Discount و بلاک‌های سفارش (Order Blocks) به شکل علّی و بدون خطا.
+VERSION: 14.0 (PYTHON 3.12+ TIMEZONE COMPLIANT & PANDAS 2.X COMPATIBLE)
 ================================================================================
 """
 
@@ -310,7 +306,6 @@ class SMCICTStrategyEngine:
             c_curr = df.iloc[i]
             c_next = df.iloc[i + 1]
 
-            # Bullish OB
             if float(c_curr["close"]) < float(c_curr["open"]):
                 c_range = float(c_next["high"] - c_next["low"])
                 body = float(c_next["close"] - c_next["open"])
@@ -334,7 +329,6 @@ class SMCICTStrategyEngine:
                     if not mitigated:
                         obs.append(ob)
 
-            # Bearish OB
             elif float(c_curr["close"]) > float(c_curr["open"]):
                 c_range = float(c_next["high"] - c_next["low"])
                 body = float(c_next["open"] - c_next["close"])
