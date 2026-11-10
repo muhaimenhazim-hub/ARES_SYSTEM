@@ -2,18 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 04: TRADE & POSITION MANAGEMENT ENGINE
-VERSION: 2.5 (MT5 TICKET TRACKING & ZERO MOCK EXECUTION)
-================================================================================
-ماموریت ماژول:
-این ماژول مسئول اجرای سفارش‌ها، مدیریت فعال پوزیشن‌ها، ثبت حد ضرر الزامی،
-خروج‌های پله‌ای (Partial TP)، انتقال حد ضرر به نقطه سر‌به‌سر (Break-Even)،
-ردیابی تیکت متاتریدر ۵ و تسویه دقیق معامله است.
-
-اصول قطعی و غیرقابل تغییر حفظ شده:
-- هیچ معامله‌ای بدون ثبت قطعی Stop Loss باز نخواهد ماند.
-- انتقال حد ضرر فقط در جهت کاهش ریسک مجاز است.
-- خروج پله‌ای: ۳۰٪ در TP1، ۳۰٪ در TP2 و ۴۰٪ در TP3.
-- مارتینگل و ورود پله‌ای (Averaging down) کاملاً ممنوع است.
+VERSION: 14.0 (LIVE UNREALIZED PNL, CONTRACT SIZE MULTIPLIER & DB RESTORE)
 ================================================================================
 """
 
@@ -21,8 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
-import numpy as np
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class OrderType(Enum):
@@ -51,7 +39,7 @@ class ExecutionMode(Enum):
 class PartialExitRecord:
     """ثبت جزئیات خروج پله‌ای"""
     exit_id: str
-    target_name: str  # 'TP1', 'TP2', 'TP3'
+    target_name: str
     exit_price: float
     closed_volume: float
     realized_pnl: float
@@ -84,12 +72,14 @@ class ManagedPosition:
     status: PositionStatus = PositionStatus.OPEN
     partial_exits: List[PartialExitRecord] = field(default_factory=list)
     realized_pnl: float = 0.0
+    floating_pnl: float = 0.0
     total_fees_paid: float = 0.0
     open_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     close_time: Optional[datetime] = None
     exit_reason: Optional[str] = None
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
+        display_pnl = self.realized_pnl + (self.floating_pnl if self.status == PositionStatus.OPEN else 0.0)
         return {
             "position_id": self.position_id,
             "user_id": self.user_id,
@@ -97,40 +87,38 @@ class ManagedPosition:
             "symbol": self.symbol,
             "market": self.market,
             "side": self.side.value,
-            "entry_price": round(self.entry_price, 4),
+            "entry_price": round(self.entry_price, 5),
             "initial_volume": round(self.initial_volume, 4),
             "current_volume": round(self.current_volume, 4),
-            "stop_loss": round(self.stop_loss, 4),
-            "initial_stop_loss": round(self.initial_stop_loss, 4),
+            "stop_loss": round(self.stop_loss, 5),
+            "initial_stop_loss": round(self.initial_stop_loss, 5),
             "targets": {
-                "tp1": round(self.tp1, 4),
-                "tp2": round(self.tp2, 4),
-                "tp3": round(self.tp3, 4),
+                "tp1": round(self.tp1, 5),
+                "tp2": round(self.tp2, 5),
+                "tp3": round(self.tp3, 5),
             },
             "risk_amount_usd": round(self.risk_amount_usd, 2),
             "is_break_even": self.is_break_even,
             "status": self.status.value,
-            "realized_pnl": round(self.realized_pnl, 4),
+            "realized_pnl": round(display_pnl, 2),
             "total_fees_paid": round(self.total_fees_paid, 4),
             "partial_exits_count": len(self.partial_exits),
             "exit_reason": self.exit_reason,
-            "open_time": self.open_time.isoformat(),
-            "close_time": self.close_time.isoformat() if self.close_time else None,
+            "open_time": self.open_time.isoformat() if isinstance(self.open_time, datetime) else str(self.open_time),
+            "close_time": self.close_time.isoformat() if isinstance(self.close_time, datetime) else self.close_time,
         }
 
 
 class TradePositionManagementEngine:
-    """
-    موتور مستقل مدیریت معاملات و پوزیشن‌ها
-    """
+    """موتور مستقل مدیریت معاملات و پوزیشن‌ها"""
 
     def __init__(
         self,
         mode: ExecutionMode = ExecutionMode.LIVE,
-        tp1_ratio: float = 0.30,  # ۳۰ درصد خروج در تارگت ۱
-        tp2_ratio: float = 0.30,  # ۳۰ درصد خروج در تارگت ۲
-        tp3_ratio: float = 0.40,  # ۴۰ درصد خروج در تارگت ۳
-        taker_fee_pct: float = 0.0005,  # کارمزد تخمینی صرافی (۰.۰۵٪)
+        tp1_ratio: float = 0.30,
+        tp2_ratio: float = 0.30,
+        tp3_ratio: float = 0.40,
+        taker_fee_pct: float = 0.0005,
     ):
         self.mode = mode
         self.tp1_ratio = tp1_ratio
@@ -139,6 +127,34 @@ class TradePositionManagementEngine:
         self.taker_fee_pct = taker_fee_pct
         self.open_positions: Dict[str, ManagedPosition] = {}
         self.trade_history: List[ManagedPosition] = []
+
+    def restore_position_from_db(self, row: Dict[str, Any]):
+        """بازیابی پوزیشن باز از دیتابیس هنگام شروع مجدد برنامه"""
+        pos_id = str(row["trade_id"])
+        if pos_id in self.open_positions:
+            return
+        side = OrderSide.BUY if str(row.get("side", "BUY")).upper() == "BUY" else OrderSide.SELL
+        pos = ManagedPosition(
+            position_id=pos_id,
+            user_id=str(row.get("user_id", "default")),
+            mt5_ticket=int(row.get("mt5_ticket", 0)),
+            symbol=str(row["symbol"]),
+            market=str(row.get("market", "FOREX_OR_INDICES")),
+            side=side,
+            entry_price=float(row["entry_price"]),
+            initial_volume=float(row.get("initial_volume", row["current_volume"])),
+            current_volume=float(row["current_volume"]),
+            stop_loss=float(row["stop_loss"]),
+            initial_stop_loss=float(row.get("initial_stop_loss", row["stop_loss"])),
+            tp1=float(row.get("tp1", 0.0)),
+            tp2=float(row.get("tp2", 0.0)),
+            tp3=float(row.get("tp3", 0.0)),
+            risk_amount_usd=float(row.get("risk_amount_usd", 0.0)),
+            is_break_even=bool(row.get("is_break_even", 0)),
+            realized_pnl=float(row.get("realized_pnl", 0.0)),
+            total_fees_paid=float(row.get("total_fees", 0.0)),
+        )
+        self.open_positions[pos_id] = pos
 
     def open_position(
         self,
@@ -155,25 +171,19 @@ class TradePositionManagementEngine:
         user_id: str = "default",
         mt5_ticket: int = 0,
     ) -> Tuple[bool, Optional[ManagedPosition], str]:
-        """
-        ایجاد و اعتبارسنجی پوزیشن جدید همراه با الزام ثبت حد ضرر (تفکیک به ازای هر کاربر)
-        """
-        # ۱. بررسی عدم امکان ورود هم‌زمان روی یک نماد برای یک کاربر خاص
         for pos in self.open_positions.values():
             if pos.symbol == symbol and pos.user_id == user_id:
                 return False, None, f"خطای رد سفارش: پوزیشن باز روی نماد {symbol} برای کاربر وجود دارد."
 
-        # ۲. اعتبارسنجی قطعی حد ضرر
         side = OrderSide.BUY if side_str.upper() == "BUY" else OrderSide.SELL
         if side == OrderSide.BUY and stop_loss >= entry_price:
             return False, None, "خطا: برای معامله BUY حد ضرر باید زیر قیمت ورود باشد."
         if side == OrderSide.SELL and stop_loss <= entry_price:
             return False, None, "خطا: برای معامله SELL حد ضرر باید بالای قیمت ورود باشد."
 
-        # ۳. محاسبه کارمزد ورود
         entry_fee = entry_price * allocated_volume * self.taker_fee_pct
 
-        pos_id = f"POS_{symbol}_{uuid.uuid4().hex[:8]}"
+        pos_id = f"POS_{symbol.replace(' ', '')}_{uuid.uuid4().hex[:8]}"
         new_pos = ManagedPosition(
             position_id=pos_id,
             user_id=user_id,
@@ -202,56 +212,60 @@ class TradePositionManagementEngine:
         current_high: float,
         current_low: float,
         current_close: float,
-    ) -> Dict:
-        """
-        مدیریت پویا و زنده پوزیشن با هر تیک قیمتی جدید
-        """
+        contract_size: float = 1.0,
+    ) -> Dict[str, Any]:
         if position_id not in self.open_positions:
             return {"status": "NOT_FOUND"}
 
         pos = self.open_positions[position_id]
         events: List[str] = []
 
+        # محاسبه سود/زیان شناور لحظه‌ای (با در نظر گرفتن اندازه قرارداد فارکس/طلا)
+        price_diff = (current_close - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - current_close)
+        pos.floating_pnl = price_diff * pos.current_volume * contract_size
+
         # ۱. بررسی برخورد با حد ضرر (Stop Loss)
-        sl_hit = False
-        sl_exit_price = pos.stop_loss
+        if pos.stop_loss > 0:
+            sl_hit = False
+            sl_exit_price = pos.stop_loss
 
-        if pos.side == OrderSide.BUY and current_low <= pos.stop_loss:
-            sl_hit = True
-        elif pos.side == OrderSide.SELL and current_high >= pos.stop_loss:
-            sl_hit = True
+            if pos.side == OrderSide.BUY and current_low <= pos.stop_loss:
+                sl_hit = True
+            elif pos.side == OrderSide.SELL and current_high >= pos.stop_loss:
+                sl_hit = True
 
-        if sl_hit:
-            loss_per_unit = (sl_exit_price - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - sl_exit_price)
-            exit_fee = sl_exit_price * pos.current_volume * self.taker_fee_pct
-            pos.realized_pnl += (loss_per_unit * pos.current_volume) - exit_fee
-            pos.total_fees_paid += exit_fee
-            pos.current_volume = 0.0
-            pos.status = PositionStatus.CLOSED
-            pos.close_time = datetime.now(timezone.utc)
-            pos.exit_reason = "STOP_LOSS_HIT" if not pos.is_break_even else "BREAK_EVEN_STOP_HIT"
+            if sl_hit:
+                loss_per_unit = (sl_exit_price - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - sl_exit_price)
+                exit_fee = sl_exit_price * pos.current_volume * self.taker_fee_pct
+                pos.realized_pnl += (loss_per_unit * pos.current_volume * contract_size) - exit_fee
+                pos.floating_pnl = 0.0
+                pos.total_fees_paid += exit_fee
+                pos.current_volume = 0.0
+                pos.status = PositionStatus.CLOSED
+                pos.close_time = datetime.now(timezone.utc)
+                pos.exit_reason = "STOP_LOSS_HIT" if not pos.is_break_even else "BREAK_EVEN_STOP_HIT"
 
-            self.trade_history.append(pos)
-            del self.open_positions[position_id]
-            return {
-                "status": "CLOSED",
-                "reason": pos.exit_reason,
-                "position": pos.to_dict(),
-            }
+                self.trade_history.append(pos)
+                del self.open_positions[position_id]
+                return {
+                    "status": "CLOSED",
+                    "reason": pos.exit_reason,
+                    "position": pos.to_dict(),
+                }
 
         # ۲. بررسی اهداف سود پله‌ای
-        # هدف اول (TP1): خروج ۳۰٪ + انتقال حد ضرر به نقطه ورود (Break-Even)
-        if not pos.tp1_hit:
-            tp1_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp1) or \
-                          (pos.side == OrderSide.SELL and current_low <= pos.tp1)
+        if pos.tp1 > 0 and not pos.tp1_hit:
+            tp1_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp1) or (
+                pos.side == OrderSide.SELL and current_low <= pos.tp1
+            )
             if tp1_reached:
                 pos.tp1_hit = True
-                close_vol = pos.initial_volume * self.tp1_ratio
-                pnl = (pos.tp1 - pos.entry_price) * close_vol if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp1) * close_vol
+                close_vol = round(pos.initial_volume * self.tp1_ratio, 4)
+                pnl = ((pos.tp1 - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp1)) * close_vol * contract_size
                 fee = pos.tp1 * close_vol * self.taker_fee_pct
                 net_pnl = pnl - fee
 
-                pos.current_volume -= close_vol
+                pos.current_volume = max(0.01, round(pos.current_volume - close_vol, 4))
                 pos.realized_pnl += net_pnl
                 pos.total_fees_paid += fee
                 pos.partial_exits.append(
@@ -265,24 +279,23 @@ class TradePositionManagementEngine:
                     )
                 )
 
-                # انتقال حد ضرر به نقطه سر‌به‌سر (Break-Even با احتساب کارمزد)
                 fee_buffer = pos.entry_price * (self.taker_fee_pct * 2)
                 pos.stop_loss = (pos.entry_price + fee_buffer) if pos.side == OrderSide.BUY else (pos.entry_price - fee_buffer)
                 pos.is_break_even = True
                 events.append("TP1 محقق شد (۳۰٪ خروج) — حد ضرر به نقطه Break-Even منتقل شد.")
 
-        # هدف دوم (TP2): خروج ۳۰٪ دیگر + جابجایی تریلینگ استاپ به TP1
-        if pos.tp1_hit and not pos.tp2_hit:
-            tp2_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp2) or \
-                          (pos.side == OrderSide.SELL and current_low <= pos.tp2)
+        if pos.tp2 > 0 and pos.tp1_hit and not pos.tp2_hit:
+            tp2_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp2) or (
+                pos.side == OrderSide.SELL and current_low <= pos.tp2
+            )
             if tp2_reached:
                 pos.tp2_hit = True
-                close_vol = pos.initial_volume * self.tp2_ratio
-                pnl = (pos.tp2 - pos.entry_price) * close_vol if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp2) * close_vol
+                close_vol = round(pos.initial_volume * self.tp2_ratio, 4)
+                pnl = ((pos.tp2 - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp2)) * close_vol * contract_size
                 fee = pos.tp2 * close_vol * self.taker_fee_pct
                 net_pnl = pnl - fee
 
-                pos.current_volume -= close_vol
+                pos.current_volume = max(0.01, round(pos.current_volume - close_vol, 4))
                 pos.realized_pnl += net_pnl
                 pos.total_fees_paid += fee
                 pos.partial_exits.append(
@@ -298,19 +311,20 @@ class TradePositionManagementEngine:
                 pos.stop_loss = pos.tp1
                 events.append("TP2 محقق شد (۳۰٪ خروج) — تریلینگ استاپ به سطح TP1 ارتقا یافت.")
 
-        # هدف سوم و نهایی (TP3): خروج ۴۰٪ باقیمانده و تسویه معامله
-        if pos.tp2_hit and not pos.tp3_hit:
-            tp3_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp3) or \
-                          (pos.side == OrderSide.SELL and current_low <= pos.tp3)
+        if pos.tp3 > 0 and pos.tp2_hit and not pos.tp3_hit:
+            tp3_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp3) or (
+                pos.side == OrderSide.SELL and current_low <= pos.tp3
+            )
             if tp3_reached:
                 pos.tp3_hit = True
                 close_vol = pos.current_volume
-                pnl = (pos.tp3 - pos.entry_price) * close_vol if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp3) * close_vol
+                pnl = ((pos.tp3 - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp3)) * close_vol * contract_size
                 fee = pos.tp3 * close_vol * self.taker_fee_pct
                 net_pnl = pnl - fee
 
                 pos.current_volume = 0.0
                 pos.realized_pnl += net_pnl
+                pos.floating_pnl = 0.0
                 pos.total_fees_paid += fee
                 pos.status = PositionStatus.CLOSED
                 pos.close_time = datetime.now(timezone.utc)
@@ -343,8 +357,7 @@ class TradePositionManagementEngine:
             "position": pos.to_dict(),
         }
 
-    def emergency_close_all(self, reason: str = "EMERGENCY_STOP") -> List[Dict]:
-        """بستن فوری و حفاظتی تمام معاملات باز"""
+    def emergency_close_all(self, reason: str = "EMERGENCY_STOP") -> List[Dict[str, Any]]:
         closed_reports = []
         for pos_id, pos in list(self.open_positions.items()):
             pos.status = PositionStatus.CLOSED

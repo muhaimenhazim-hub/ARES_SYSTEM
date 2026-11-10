@@ -2,12 +2,11 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 4.0 (AUTO-SYNC ZERO GHOST TRADES & LIVE TABLE FETCHER)
+VERSION: 14.0 (PERSISTENT REAL TRADES, MT5 LIVE SYNC & ZERO DATA LOSS)
 ================================================================================
 """
 
 import hashlib
-import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -17,14 +16,14 @@ class AresDatabaseManager:
     def __init__(self, db_path: str = "ares_trading.db"):
         self.db_path = db_path
         self._initialize_database()
-        self.clean_all_mock_data()
+        self.clean_only_mock_data()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=20.0)
+        conn = sqlite3.connect(self.db_path, timeout=25.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA busy_timeout = 10000;")
         return conn
 
     def _initialize_database(self):
@@ -156,15 +155,48 @@ class AresDatabaseManager:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    def get_user_by_identifier_or_login(self, identifier: str = "", mt5_login: str = "") -> Optional[Dict[str, Any]]:
+        clean_id = str(identifier).strip().lower()
+        clean_login = str(mt5_login).strip()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if clean_login:
+                cursor.execute("""
+                    SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_server 
+                    FROM user_broker_configs c
+                    JOIN users u ON c.user_id = u.user_id
+                    WHERE c.mt5_login = ?;
+                """, (clean_login,))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+            if clean_id:
+                cursor.execute("""
+                    SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_server 
+                    FROM users u
+                    LEFT JOIN user_broker_configs c ON u.user_id = c.user_id
+                    WHERE u.identifier = ? OR u.user_id = ?;
+                """, (clean_id, clean_id))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+        return None
+
     def get_user_broker_config(self, user_id: str) -> Dict[str, Any]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM user_broker_configs WHERE user_id = ?;", (user_id,))
+            cursor.execute("""
+                SELECT c.*, u.identifier 
+                FROM user_broker_configs c
+                JOIN users u ON c.user_id = u.user_id
+                WHERE c.user_id = ?;
+            """, (user_id,))
             row = cursor.fetchone()
             if row:
                 return dict(row)
             return {
                 "user_id": user_id,
+                "identifier": "",
                 "trading_mode": "LIVE",
                 "binance_api_key": "",
                 "binance_secret_key": "",
@@ -176,6 +208,17 @@ class AresDatabaseManager:
 
     def save_user_broker_config(self, user_id: str, cfg: Dict[str, Any]):
         now = datetime.now(timezone.utc).isoformat()
+        existing = self.get_user_broker_config(user_id)
+
+        # اگر کاربر رمز عبور جدیدی وارد نکرده، رمز قبلی حفظ شود
+        mt5_pass = str(cfg.get("mt5_pass", "")).strip()
+        if not mt5_pass:
+            mt5_pass = existing.get("mt5_pass", "")
+
+        b_secret = str(cfg.get("binance_secret_key", "")).strip()
+        if not b_secret:
+            b_secret = existing.get("binance_secret_key", "")
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -194,12 +237,12 @@ class AresDatabaseManager:
             """, (
                 user_id,
                 cfg.get("trading_mode", "LIVE"),
-                cfg.get("binance_api_key", "").strip(),
-                cfg.get("binance_secret_key", "").strip(),
-                str(cfg.get("mt5_login", "")).strip(),
-                str(cfg.get("mt5_pass", "")).strip(),
-                str(cfg.get("mt5_server", "")).strip(),
-                cfg.get("is_auto_trading", 0),
+                str(cfg.get("binance_api_key", existing.get("binance_api_key", ""))).strip(),
+                b_secret,
+                str(cfg.get("mt5_login", existing.get("mt5_login", ""))).strip(),
+                mt5_pass,
+                str(cfg.get("mt5_server", existing.get("mt5_server", ""))).strip(),
+                existing.get("is_auto_trading", 0),
                 now,
             ))
             conn.commit()
@@ -228,36 +271,107 @@ class AresDatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT u.user_id, u.identifier, c.is_auto_trading, c.trading_mode, c.mt5_login 
+                SELECT u.user_id, u.identifier, c.is_auto_trading, c.trading_mode, 
+                       c.mt5_login, c.mt5_pass, c.mt5_server,
+                       c.binance_api_key, c.binance_secret_key
                 FROM user_broker_configs c
                 JOIN users u ON c.user_id = u.user_id
                 WHERE c.is_auto_trading = 1;
             """)
             return [dict(r) for r in cursor.fetchall()]
 
-    def clean_all_mock_data(self):
-        """پاکسازی معاملات تست قدیمی و بستن پوزیشن‌های شبح"""
+    def get_all_mt5_configured_users(self) -> List[Dict[str, Any]]:
+        """دریافت لیست کاربرانی که شماره حساب و رمز متاتریدر ۵ را وارد کرده‌اند (جهت اتصال خودکار سرور)"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_pass, c.mt5_server, c.is_auto_trading
+                FROM user_broker_configs c
+                JOIN users u ON c.user_id = u.user_id
+                WHERE c.mt5_login != '' AND c.mt5_pass != '';
+            """)
+            return [dict(r) for r in cursor.fetchall()]
+
+    def clean_only_mock_data(self):
+        """حذف صرفاً داده‌های آزمایشی فیک بدون دست زدن به معاملات واقعی باز یا بسته کاربر"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM trades WHERE trade_id LIKE 'POS_TEST%' OR trade_id LIKE 'TEST%' OR trade_id LIKE 'MOCK%';")
-                cursor.execute("UPDATE trades SET status = 'CLOSED' WHERE status = 'OPEN';")
-                cursor.execute("DELETE FROM partial_exits;")
                 conn.commit()
         except Exception:
             pass
+
+    def sync_mt5_live_positions(self, user_id: str, mt5_positions: List[Dict[str, Any]]):
+        """همگام‌سازی لحظه‌ای جدول پوزیشن‌های باز دشبورد با پوزیشن‌های واقعی داخل متاتریدر ۵"""
+        if mt5_positions is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        active_tickets = set()
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for p in mt5_positions:
+                ticket = int(p.get("ticket", 0))
+                if ticket <= 0:
+                    continue
+                active_tickets.add(ticket)
+                symbol = str(p.get("symbol", "XAUUSD")).rstrip(".")
+                side = str(p.get("side", p.get("type", "BUY"))).upper()
+                entry_price = float(p.get("entry_price", p.get("price_open", 0.0)))
+                sl = float(p.get("sl", p.get("stop_loss", 0.0)))
+                tp = float(p.get("tp", p.get("take_profit", 0.0)))
+                vol = float(p.get("volume", 0.01))
+                profit = float(p.get("profit", p.get("unrealized_pnl", 0.0)))
+
+                cursor.execute("SELECT trade_id FROM trades WHERE user_id = ? AND mt5_ticket = ?;", (user_id, ticket))
+                row = cursor.fetchone()
+                if row:
+                    cursor.execute("""
+                        UPDATE trades 
+                        SET current_volume = ?, stop_loss = ?, realized_pnl = ?, status = 'OPEN'
+                        WHERE trade_id = ?;
+                    """, (vol, sl, profit, row["trade_id"]))
+                else:
+                    trade_id = f"MT5_{ticket}"
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO trades (
+                            trade_id, user_id, mt5_ticket, symbol, market, side, entry_price,
+                            initial_volume, current_volume, stop_loss, initial_stop_loss,
+                            tp1, tp2, tp3, risk_amount_usd, realized_pnl, total_fees,
+                            is_break_even, status, opened_at
+                        ) VALUES (?, ?, ?, ?, 'FOREX_OR_INDICES', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, 0.0, 0, 'OPEN', ?);
+                    """, (trade_id, user_id, ticket, symbol, side, entry_price, vol, vol, sl, sl, tp, tp, tp, profit, now))
+
+            # بستن معاملاتی که در متاتریدر بسته شده‌اند
+            cursor.execute("SELECT trade_id, mt5_ticket FROM trades WHERE user_id = ? AND status = 'OPEN' AND mt5_ticket > 0;", (user_id,))
+            for row in cursor.fetchall():
+                if int(row["mt5_ticket"]) not in active_tickets:
+                    cursor.execute("""
+                        UPDATE trades SET status = 'CLOSED', closed_at = ?, exit_reason = 'MT5_CLOSED'
+                        WHERE trade_id = ?;
+                    """, (now, row["trade_id"]))
+            conn.commit()
 
     def get_user_open_trades(self, user_id: str) -> List[Dict[str, Any]]:
         """دریافت لیست واقعی معاملات باز کاربر جهت نمایش در جدول داشبورد"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT trade_id, symbol, side, entry_price, stop_loss, current_volume, 
-                       realized_pnl, status, mt5_ticket
+                SELECT trade_id, user_id, symbol, market, side, entry_price, stop_loss, initial_stop_loss,
+                       initial_volume, current_volume, tp1, tp2, tp3, risk_amount_usd,
+                       realized_pnl, total_fees, is_break_even, status, mt5_ticket, opened_at
                 FROM trades 
                 WHERE user_id = ? AND status = 'OPEN'
                 ORDER BY opened_at DESC;
             """, (user_id,))
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_all_open_trades(self) -> List[Dict[str, Any]]:
+        """بازیابی تمام پوزیشن‌های باز هنگام روشن شدن مجدد سرور"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trades WHERE status = 'OPEN';")
             return [dict(r) for r in cursor.fetchall()]
 
     def record_new_trade(self, pos_data: Dict[str, Any], user_id: str = "default"):

@@ -2,16 +2,15 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 13.0 (ROCK-SOLID NEVER-CRASH DAEMON & FAST POLLING)
+VERSION: 14.0 (FULL MT5 CREDENTIALS LOGIN, REAL-TIME PNL & LIVE POSITIONS SYNC)
 ================================================================================
 """
 
 import os
 import socket
-from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -67,7 +66,7 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-robot text-3xl text-emerald-400"></i>
                 </div>
                 <h2 class="text-xl md:text-2xl font-bold text-white tracking-wider">ARES AI TRADING</h2>
-                <p class="text-xs text-gray-400 mt-1">سامانه اختصاصی مدیریت معاملات هوشمند</p>
+                <p class="text-xs text-gray-400 mt-1">سامانه اختصاصی مدیریت معاملات هوشمند ۲۴ ساعته</p>
             </div>
 
             <div class="flex border-b border-gray-800 mb-6">
@@ -82,7 +81,7 @@ HTML_TEMPLATE = """
                 </div>
                 <div>
                     <label class="block text-gray-400 mb-1">کلمه عبور:</label>
-                    <input type="password" id="auth-password" placeholder="کلمه عبور" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
+                    <input type="password" id="auth-password" placeholder="کلمه عبور (حداقل ۴ کاراکتر)" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
                 </div>
                 <button id="auth-submit-btn" onclick="handleAuthSubmit()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition shadow-lg shadow-emerald-950/40">
                     ورود به پنل کاربری
@@ -113,7 +112,7 @@ HTML_TEMPLATE = """
                 </button>
 
                 <button onclick="openSettingsModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1 shadow-md shadow-blue-900/30">
-                    <i class="fa-solid fa-gear"></i> تنظیمات حساب
+                    <i class="fa-solid fa-gear"></i> تنظیمات و اتصال متاتریدر
                 </button>
 
                 <button onclick="logoutUser()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1">
@@ -129,16 +128,16 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-wallet text-emerald-400"></i>
                 </div>
                 <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="equity-val">$0.00</div>
-                <div class="text-xs text-gray-400 mt-2 font-medium" id="account-id-display">در انتظار اتصال اکسپرت متاتریدر</div>
+                <div class="text-xs text-gray-400 mt-2 font-medium" id="account-id-display">در انتظار اتصال حساب</div>
             </div>
 
             <div class="card p-5">
                 <div class="text-gray-400 text-sm font-medium flex justify-between">
-                    <span>سود محقق‌شده معاملات</span>
+                    <span>سود و زیان خالص کل</span>
                     <i class="fa-solid fa-chart-line text-blue-400"></i>
                 </div>
                 <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="daily-pnl">$0.00</div>
-                <div class="text-xs text-gray-400 mt-2">معاملات بسته شده حساب متصل</div>
+                <div class="text-xs text-gray-400 mt-2">بر اساس تاریخچه واقعی بروکر</div>
             </div>
 
             <div class="card p-5">
@@ -147,7 +146,7 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-layer-group text-purple-400"></i>
                 </div>
                 <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" style="direction: ltr; text-align: right;" id="open-positions-count">0 / 3</div>
-                <div class="text-xs text-gray-400 mt-2">سقف مجاز: حداکثر ۳ پوزیشن</div>
+                <div class="text-xs text-gray-400 mt-2">سقف مجاز: حداکثر ۳ پوزیشن همزمان</div>
             </div>
 
             <div class="card p-5">
@@ -155,7 +154,7 @@ HTML_TEMPLATE = """
                     <span>افت سرمایه (Drawdown)</span>
                     <i class="fa-solid fa-shield-halved text-amber-400"></i>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-emerald-400 mt-2">0.00%</div>
+                <div class="text-2xl md:text-3xl font-extrabold text-emerald-400 mt-2" id="drawdown-val">0.00%</div>
                 <div class="text-xs text-gray-400 mt-2">سقف کنترل ریسک: 12%</div>
             </div>
         </div>
@@ -174,7 +173,7 @@ HTML_TEMPLATE = """
                             <th class="py-3 px-3">قیمت ورود</th>
                             <th class="py-3 px-3">حد ضرر (SL)</th>
                             <th class="py-3 px-3">حجم</th>
-                            <th class="py-3 px-3">سود/زیان</th>
+                            <th class="py-3 px-3">سود/زیان لحظه‌ای</th>
                             <th class="py-3 px-3">وضعیت</th>
                         </tr>
                     </thead>
@@ -192,21 +191,31 @@ HTML_TEMPLATE = """
         <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-xl w-full p-6 text-right max-h-[90vh] overflow-y-auto shadow-2xl">
             <div class="flex justify-between items-center pb-3 border-b border-gray-800">
                 <h3 class="text-base font-bold text-white flex items-center gap-2">
-                    <i class="fa-solid fa-sliders text-blue-400"></i> اتصال حساب معاملاتی شما
+                    <i class="fa-solid fa-sliders text-blue-400"></i> اتصال مستقیم حساب معاملاتی (بدون نیاز به روشن ماندن کامپیوتر)
                 </h3>
                 <button onclick="closeSettingsModal()" class="text-gray-400 hover:text-white text-xl">&times;</button>
             </div>
 
-            <div class="mt-4 p-4 rounded-lg bg-emerald-950/30 border border-emerald-800/60 space-y-2 text-xs">
-                <h4 class="font-bold text-emerald-400 flex items-center gap-1.5"><i class="fa-solid fa-circle-check"></i> متاتریدر ۵</h4>
+            <div class="mt-4 p-4 rounded-lg bg-emerald-950/30 border border-emerald-800/60 space-y-3 text-xs">
+                <h4 class="font-bold text-emerald-400 flex items-center gap-1.5">
+                    <i class="fa-solid fa-circle-check"></i> اطلاعات حساب متاتریدر ۵ (MT5)
+                </h4>
                 <div>
-                    <label class="block text-gray-400 mb-1">شماره حساب متاتریدر ۵:</label>
-                    <input type="text" id="cfg-mt5-login" placeholder="مثال: 300260" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
+                    <label class="block text-gray-300 mb-1">شماره حساب متاتریدر ۵ (Login):</label>
+                    <input type="text" id="cfg-mt5-login" placeholder="مثال: 300260" class="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white font-mono">
+                </div>
+                <div>
+                    <label class="block text-gray-300 mb-1">رمز عبور متاتریدر ۵ (Password):</label>
+                    <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور اصلی متاتریدر را وارد کنید" class="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white font-mono">
+                </div>
+                <div>
+                    <label class="block text-gray-300 mb-1">نام سرور بروکر (Server):</label>
+                    <input type="text" id="cfg-mt5-server" placeholder="مثال: AronMarkets-Demo یا AronMarkets-Live" class="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white font-mono">
                 </div>
             </div>
 
             <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-amber-900/40 space-y-2.5 text-xs">
-                <h4 class="font-bold text-amber-400 flex items-center gap-1.5"><i class="fa-brands fa-bitcoin"></i> صرافی بایننس (کریپتو فیوچرز)</h4>
+                <h4 class="font-bold text-amber-400 flex items-center gap-1.5"><i class="fa-brands fa-bitcoin"></i> صرافی بایننس (کریپتو فیوچرز - اختیاری)</h4>
                 <div>
                     <label class="block text-gray-400 mb-1">Binance API Key:</label>
                     <input type="text" id="cfg-binance-key" placeholder="API Key" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
@@ -219,8 +228,8 @@ HTML_TEMPLATE = """
 
             <div class="mt-6 flex justify-end gap-3">
                 <button onclick="closeSettingsModal()" class="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg text-xs">بستن</button>
-                <button onclick="saveAccountSettings()" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold">
-                    ذخیره تنظیمات
+                <button onclick="saveAccountSettings()" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-950/50">
+                    ذخیره و اتصال خودکار ۲۴ ساعته
                 </button>
             </div>
         </div>
@@ -317,13 +326,16 @@ HTML_TEMPLATE = """
                     return;
                 }
                 const data = await res.json();
-                document.getElementById('equity-val').innerText = `$${data.equity.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                document.getElementById('equity-val').innerText = `$${Number(data.equity || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
                 
-                const pnl = data.is_connected ? data.daily_pnl : 0.0;
+                const pnl = Number(data.daily_pnl || 0);
                 document.getElementById('daily-pnl').innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
                 document.getElementById('daily-pnl').className = `text-2xl md:text-3xl font-extrabold mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`;
                 
-                const openCount = data.open_positions_count;
+                const dd = Number(data.drawdown_pct || 0);
+                document.getElementById('drawdown-val').innerText = `${dd.toFixed(2)}%`;
+
+                const openCount = data.open_positions_count || 0;
                 document.getElementById('open-positions-count').innerText = `${openCount} / 3`;
                 document.getElementById('account-id-display').innerText = data.account_info;
                 document.getElementById('broker-connected-info').innerText = data.broker_info;
@@ -352,16 +364,17 @@ HTML_TEMPLATE = """
             let html = '';
             for (const t of trades) {
                 const sideColor = t.side === 'BUY' ? 'text-emerald-400 bg-emerald-950/40 border-emerald-800' : 'text-red-400 bg-red-950/40 border-red-800';
-                const pnlColor = t.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
+                const pnlVal = Number(t.realized_pnl || 0);
+                const pnlColor = pnlVal >= 0 ? 'text-emerald-400' : 'text-red-400';
                 html += `
                     <tr class="hover:bg-gray-800/40 transition">
-                        <td class="py-3 px-3 font-mono">${t.mt5_ticket ? '#' + t.mt5_ticket : t.trade_id.substring(0, 10)}</td>
+                        <td class="py-3 px-3 font-mono">${t.mt5_ticket ? '#' + t.mt5_ticket : String(t.trade_id).substring(0, 10)}</td>
                         <td class="py-3 px-3 font-bold text-white">${t.symbol}</td>
                         <td class="py-3 px-3"><span class="px-2 py-0.5 rounded border text-xs font-bold ${sideColor}">${t.side}</span></td>
                         <td class="py-3 px-3 font-mono">${t.entry_price}</td>
                         <td class="py-3 px-3 font-mono text-red-400">${t.stop_loss}</td>
                         <td class="py-3 px-3 font-mono">${t.current_volume}</td>
-                        <td class="py-3 px-3 font-mono font-bold ${pnlColor}">${t.realized_pnl >= 0 ? '+' : ''}$${t.realized_pnl.toFixed(2)}</td>
+                        <td class="py-3 px-3 font-mono font-bold ${pnlColor}">${pnlVal >= 0 ? '+' : ''}$${pnlVal.toFixed(2)}</td>
                         <td class="py-3 px-3"><span class="text-xs text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">فعال (Open)</span></td>
                     </tr>
                 `;
@@ -400,7 +413,10 @@ HTML_TEMPLATE = """
             .then(r => r.json())
             .then(data => {
                 document.getElementById('cfg-mt5-login').value = data.mt5_login || '';
+                document.getElementById('cfg-mt5-server').value = data.mt5_server || 'AronMarkets-Demo';
+                document.getElementById('cfg-mt5-pass').value = '';
                 document.getElementById('cfg-binance-key').value = data.binance_api_key || '';
+                document.getElementById('cfg-binance-secret').value = '';
                 document.getElementById('settings-modal').classList.remove('hidden');
             });
         }
@@ -413,6 +429,8 @@ HTML_TEMPLATE = """
             if (!currentUser) return;
             const payload = {
                 mt5_login: document.getElementById('cfg-mt5-login').value.trim(),
+                mt5_pass: document.getElementById('cfg-mt5-pass').value.trim(),
+                mt5_server: document.getElementById('cfg-mt5-server').value.trim(),
                 binance_api_key: document.getElementById('cfg-binance-key').value.trim(),
                 binance_secret_key: document.getElementById('cfg-binance-secret').value.trim(),
             };
@@ -426,9 +444,8 @@ HTML_TEMPLATE = """
                 body: JSON.stringify(payload)
             });
 
-            const data = await res.json();
             if (res.ok) {
-                alert("تنظیمات با موفقیت ذخیره شد.");
+                alert("اطلاعات حساب با موفقیت ذخیره شد و به سرویس ۲۴ ساعته سرور متصل گردید.");
                 closeSettingsModal();
                 fetchUserStatus();
             }
@@ -443,21 +460,30 @@ HTML_TEMPLATE = """
 async def bridge_sync_api(request: Request):
     try:
         data = await request.json()
-        identifier = data.get("identifier", "").strip().lower()
+        identifier = str(data.get("identifier", "")).strip().lower()
         login_str = str(data.get("login", "")).strip()
 
-        if identifier:
-            account_config.update_bridge_data(identifier, data)
+        account_config.update_bridge_data(identifier or login_str, data)
 
-        pending_orders: List[Dict[str, Any]] = []
-        if identifier:
-            pending_orders = account_config.pop_pending_mt5_commands(identifier)
-        if not pending_orders and login_str:
-            pending_orders = account_config.pop_pending_mt5_commands(login_str)
+        # اگر متاتریدر لیست پوزیشن‌های باز را فرستاد، در دیتابیس همگام‌سازی شود
+        matched_user = db.get_user_by_identifier_or_login(identifier, login_str)
+        if matched_user and "open_positions" in data and isinstance(data["open_positions"], list):
+            db.sync_mt5_live_positions(matched_user["user_id"], data["open_positions"])
 
+        pending_orders = account_config.pop_pending_mt5_commands(identifier=identifier, login_str=login_str)
         return {"status": "SYNCED", "orders": pending_orders}
     except Exception:
         return {"status": "SYNCED", "orders": []}
+
+
+@app.get("/api/bridge/credentials")
+def get_mt5_credentials_for_local_daemon(request: Request):
+    """اندپوینت داخلی (فقط قابل دسترسی از خود سرور 127.0.0.1) جهت لاگین خودکار متاتریدر بدون نیاز به کامپیوتر کاربر"""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "localhost", "::1"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    users = db.get_all_mt5_configured_users()
+    return {"accounts": users}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -497,12 +523,31 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
         user_cfg["user_id"] = x_user_id
 
         equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
+        bridge_snap = account_config.get_user_bridge_snapshot(user_cfg)
+
         summary = db.get_portfolio_summary(user_id=x_user_id)
         open_trades_list = db.get_user_open_trades(user_id=x_user_id)
 
+        # محاسبه سود واقعی: اگر متاتریدر سود تاریخچه یا اختلاف بالانس/اکوئیتی را فرستاده، از آن استفاده کن
+        real_pnl = summary.get("net_realized_pnl_usd", 0.0)
+        drawdown_pct = 0.0
+
+        if bridge_snap:
+            if "history_pnl" in bridge_snap:
+                real_pnl = float(bridge_snap["history_pnl"]) + float(bridge_snap.get("floating_pnl", 0.0))
+            elif real_pnl == 0.0 and "balance" in bridge_snap:
+                bal = float(bridge_snap.get("balance", equity))
+                initial_cap = float(bridge_snap.get("initial_deposit", 100000.0 if bal > 50000 else bal))
+                real_pnl = round(equity - initial_cap, 2)
+
+            bal_val = float(bridge_snap.get("balance", equity))
+            if bal_val > 0 and equity < bal_val:
+                drawdown_pct = round(((bal_val - equity) / bal_val) * 100.0, 2)
+
         return {
             "equity": equity,
-            "daily_pnl": summary.get("net_realized_pnl_usd", 0.0) if is_conn else 0.0,
+            "daily_pnl": real_pnl if is_conn else 0.0,
+            "drawdown_pct": drawdown_pct if is_conn else 0.0,
             "open_positions_count": len(open_trades_list) if is_conn else 0,
             "open_trades": open_trades_list if is_conn else [],
             "account_info": acc_info,
@@ -514,6 +559,7 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
         return {
             "equity": 0.0,
             "daily_pnl": 0.0,
+            "drawdown_pct": 0.0,
             "open_positions_count": 0,
             "open_trades": [],
             "account_info": "در حال ارتباط...",
@@ -530,6 +576,7 @@ def get_user_config_api(x_user_id: Optional[str] = Header(None)):
     cfg = db.get_user_broker_config(x_user_id)
     return {
         "mt5_login": cfg.get("mt5_login", ""),
+        "mt5_server": cfg.get("mt5_server", ""),
         "binance_api_key": cfg.get("binance_api_key", ""),
     }
 

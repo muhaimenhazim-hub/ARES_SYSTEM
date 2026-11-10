@@ -2,16 +2,16 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 1: UNIFIED MULTI-MARKET DATA CONNECTOR (Crypto & Forex & Indices)
-VERSION: 5.0 (HIGH-SPEED ZERO-DEPENDENCY CLOUD FEED & BINANCE FUTURES)
+VERSION: 14.0 (SMART TTL CACHE, ANTI-BAN RATE LIMITER & DUAL GOLD FEED)
 ================================================================================
 """
 
 import json
-import os
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Tuple
 import ccxt
 import numpy as np
 import pandas as pd
@@ -46,13 +46,7 @@ class BinanceFuturesConnector:
 
 
 class MT5ForexConnector:
-    """کانکتور زنده و پرسرعت انس طلا، فارکس و شاخص‌ها بر بستر کلود جهانی بدون نیاز به MetaApi"""
-
-    TIMEFRAME_MAP = {
-        "1h": "1h",
-        "15m": "15m",
-        "5m": "5m",
-    }
+    """کانکتور زنده و پرسرعت انس طلا، فارکس و شاخص‌ها بر بستر کلود جهانی"""
 
     SYMBOL_MAP = {
         "XAUUSD": "GC=F",
@@ -78,7 +72,6 @@ class MT5ForexConnector:
         print("🌐 دیتای زنده فارکس، انس طلا (XAUUSD) و شاخص‌ها بر بستر مستقل کلود فعال شد.")
 
     def _fetch_cloud_ohlcv(self, standard_symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
-        """دریافت زنده و بدون وقفه کندل‌ها از سرورهای جهانی بدون تحریم و بدون افت سرعت"""
         clean_sym = standard_symbol.upper().replace(" ", "").replace("/", "").replace(".", "")
         cloud_sym = self.SYMBOL_MAP.get(standard_symbol, self.SYMBOL_MAP.get(clean_sym, f"{clean_sym}=X"))
 
@@ -95,7 +88,7 @@ class MT5ForexConnector:
             with urllib.request.urlopen(req, timeout=6.0) as response:
                 payload = json.loads(response.read().decode())
                 if not payload.get("chart", {}).get("result"):
-                    return self._fetch_gold_backup(timeframe, limit) if "XAU" in clean_sym or "GOLD" in clean_sym else None
+                    return self._fetch_gold_backup(timeframe, limit) if ("XAU" in clean_sym or "GOLD" in clean_sym) else None
 
                 result = payload["chart"]["result"][0]
                 timestamps = result.get("timestamp", [])
@@ -106,11 +99,11 @@ class MT5ForexConnector:
 
                 df = pd.DataFrame({
                     "timestamp": pd.to_datetime(timestamps, unit="s"),
-                    "open": quote.get("open", [0]*len(timestamps)),
-                    "high": quote.get("high", [0]*len(timestamps)),
-                    "low": quote.get("low", [0]*len(timestamps)),
-                    "close": quote.get("close", [0]*len(timestamps)),
-                    "volume": quote.get("volume", [0]*len(timestamps)),
+                    "open": quote.get("open", [0] * len(timestamps)),
+                    "high": quote.get("high", [0] * len(timestamps)),
+                    "low": quote.get("low", [0] * len(timestamps)),
+                    "close": quote.get("close", [0] * len(timestamps)),
+                    "volume": quote.get("volume", [0] * len(timestamps)),
                 }).dropna()
 
                 if len(df) < 15:
@@ -126,7 +119,6 @@ class MT5ForexConnector:
             return None
 
     def _fetch_gold_backup(self, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
-        """پشتیبان آنی قیمت انس طلا از استخر نقدینگی بایننس (PAXG) در صورت نوسانات شدید اینترنت"""
         try:
             ex = ccxt.binance({"options": {"defaultType": "future"}, "enableRateLimit": True, "timeout": 5000})
             raw = ex.fetch_ohlcv("PAXG/USDT:USDT", timeframe=timeframe, limit=limit)
@@ -145,13 +137,21 @@ class MT5ForexConnector:
 
 
 class AresUnifiedDataService:
-    """هاب مرکزی داده‌های زنده ARES"""
+    """هاب مرکزی داده‌های زنده ARES مجهز به کش هوشمند جهت جلوگیری از مسدودیت IP"""
 
-    def __init__(self):
+    def __init__(self, cache_ttl_seconds: float = 4.0):
         self.binance = BinanceFuturesConnector()
         self.mt5 = MT5ForexConnector()
+        self.cache_ttl = cache_ttl_seconds
+        self._bundle_cache: Dict[str, Tuple[float, Dict]] = {}
 
     def get_live_multitimeframe_bundle(self, symbol: str) -> Optional[Dict]:
+        now = time.time()
+        if symbol in self._bundle_cache:
+            ts, cached_bundle = self._bundle_cache[symbol]
+            if now - ts < self.cache_ttl:
+                return cached_bundle
+
         if symbol in self.binance.CRYPTO_SYMBOLS:
             market_type = "CRYPTO_FUTURES"
             connector = self.binance
@@ -168,7 +168,7 @@ class AresUnifiedDataService:
 
         current_price = float(df_ltf.iloc[-1]["close"])
 
-        return {
+        bundle = {
             "symbol": symbol,
             "market_type": market_type,
             "current_price": current_price,
@@ -177,3 +177,5 @@ class AresUnifiedDataService:
             "df_ltf": df_ltf,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        self._bundle_cache[symbol] = (now, bundle)
+        return bundle
