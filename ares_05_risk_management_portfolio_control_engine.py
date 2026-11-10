@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 05: RISK MANAGEMENT & PORTFOLIO CONTROL ENGINE
-VERSION: 14.0 (PYTHON 3.12+ TIMEZONE COMPLIANT & SAFE MARGIN CAPS)
+VERSION: 14.2 (HARD LOT CAPS, EXACT CONTRACT SIZING & DRAWDOWN PROTECTION)
 ================================================================================
 """
 
@@ -60,6 +60,10 @@ class RiskGateDecision:
 
 class RiskManagementPortfolioEngine:
     """موتور مرکزی مدیریت ریسک و سرمایه ARES"""
+
+    # سقف نهایی حجم برای جلوگیری از هرگونه خطای فرمولی یا بروکر
+    HARD_MAX_LOT_FOREX = 0.50
+    HARD_MAX_LOT_GOLD = 0.30
 
     def __init__(
         self,
@@ -129,7 +133,23 @@ class RiskManagementPortfolioEngine:
         risk_usd: float,
         specs: ContractSpecs,
     ) -> Tuple[float, float, float]:
-        loss_per_unit = abs(entry_price - stop_loss_price) * specs.contract_size
+        """محاسبه دقیق حجم با رعایت سقف‌های ایمنی سرسختانه"""
+        contract_size = specs.contract_size
+        clean_symbol = specs.symbol.replace(" ", "").replace(".", "").upper()
+
+        # تطبیق اندازه قرارداد استاندارد فارکس و انس طلا در بروکرهای متاتریدر
+        if "XAU" in clean_symbol or "GOLD" in clean_symbol:
+            contract_size = 100.0
+            max_allowed_lot = self.HARD_MAX_LOT_GOLD
+        elif clean_symbol in ["EURUSD", "GBPUSD", "AUDUSD", "USDJPY"]:
+            contract_size = 100000.0
+            max_allowed_lot = self.HARD_MAX_LOT_FOREX
+        else:
+            max_allowed_lot = specs.max_volume
+
+        sl_distance = abs(entry_price - stop_loss_price)
+        loss_per_unit = sl_distance * contract_size
+
         if loss_per_unit <= 0:
             return specs.min_volume, 0.0, 0.0
 
@@ -138,16 +158,18 @@ class RiskManagementPortfolioEngine:
         step = specs.volume_step
         if step > 0:
             rounded_volume = np.floor(raw_volume / step) * step
-            rounded_volume = round(rounded_volume, 4)
+            rounded_volume = round(rounded_volume, 2)
         else:
-            rounded_volume = round(raw_volume, 4)
+            rounded_volume = round(raw_volume, 2)
 
+        # اعمال سقف حداقلی و حداکثری ایمن
         if rounded_volume < specs.min_volume:
             rounded_volume = specs.min_volume
-        elif rounded_volume > specs.max_volume:
-            rounded_volume = specs.max_volume
 
-        notional_value = rounded_volume * entry_price * specs.contract_size
+        if rounded_volume > max_allowed_lot:
+            rounded_volume = max_allowed_lot
+
+        notional_value = rounded_volume * entry_price * contract_size
         effective_leverage = specs.leverage if specs.leverage > 0 else 100.0
         required_margin = notional_value / effective_leverage
 

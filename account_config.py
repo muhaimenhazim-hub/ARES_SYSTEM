@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.1 (DYNAMIC BROKER SYMBOL RESOLUTION & AUTO-TERMINAL BRIDGE)
+VERSION: 14.2 (STRICT QUEUE DEDUPLICATION, IN-FLIGHT TRACKING & SAFETY CAPS)
 ================================================================================
 """
 
@@ -95,12 +95,10 @@ def get_user_bridge_snapshot(user_cfg: Dict[str, Any]) -> Optional[Dict[str, Any
 def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, Any]] = None) -> str:
     """
     شناسایی خودکار و هوشمند پسوند/پیشوند بروکر کاربر.
-    مثال: اگر در متاتریدر کاربر نماد 'EURUSD.' است، به صورت خودکار به 'EURUSD.' تبدیل می‌شود.
     """
     clean_sym = canonical_symbol.strip()
     aliases = BROKER_SYMBOL_ALIASES.get(clean_sym, [clean_sym])
 
-    # ۱. اگر متاتریدر لیست نمادهای فعال یا پوزیشن‌های باز خود را فرستاده است، تطابق دقیق بده
     bridge = get_user_bridge_snapshot(user_cfg) if user_cfg else None
     if bridge:
         known_symbols = bridge.get("active_symbols", [])
@@ -112,33 +110,79 @@ def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, An
                 if str(s).strip().upper() == alias.upper():
                     return str(s).strip()
 
-        # بررسی سرور یا نام بروکر (مثلاً بروکرهایی مثل Aron Markets که نقطه دارند)
         broker_name = str(bridge.get("broker", "")).lower()
         server_name = str(bridge.get("server", "")).lower()
         if "aron" in broker_name or "aron" in server_name:
             if clean_sym in ["EURUSD", "XAUUSD"]:
                 return f"{clean_sym}."
 
-    # پیش‌فرض: اولین نام معتبر در بروکرهای استاندارد
     return aliases[0]
 
 
-def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg: Optional[Dict[str, Any]] = None):
-    """ثبت دستور معاملاتی در صف متاتریدر با نماد دقیق بروکر کاربر"""
+def get_user_pending_commands_count(target_keys: List[str]) -> int:
+    """شمارش سفارشات منتظر در صف برای جلوگیری از ارسال مازاد بر ۳ پوزیشن"""
     all_cmds = _load_json_file(COMMANDS_FILE)
-    cmd_id = f"cmd_{int(time.time() * 1000)}_{os.urandom(2).hex()}"
-    command["cmd_id"] = cmd_id
+    unique_cmd_ids = set()
+    for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
+        for cmd in all_cmds.get(key, []):
+            if cmd.get("action") in ["BUY", "SELL"]:
+                cid = cmd.get("cmd_id", str(cmd))
+                unique_cmd_ids.add(cid)
+    return len(unique_cmd_ids)
+
+
+def is_symbol_in_pending_queue(target_keys: List[str], symbol: str) -> bool:
+    """بررسی اینکه آیا سفارشی برای این نماد در صف منتظر اجرا است یا خیر"""
+    all_cmds = _load_json_file(COMMANDS_FILE)
+    clean_target = symbol.replace(" ", "").replace(".", "").upper()
+    for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
+        for cmd in all_cmds.get(key, []):
+            cmd_sym = str(cmd.get("symbol", cmd.get("broker_symbol", ""))).replace(" ", "").replace(".", "").upper()
+            if cmd_sym == clean_target and cmd.get("action") in ["BUY", "SELL"]:
+                return True
+    return False
+
+
+def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    ثبت دستور معاملاتی با اعمال فیلتر سخت‌گیرانه ضدتکرار (Anti-Duplication)
+    و سقف‌گذاری قطعی حداکثر ۳ سفارش در صف
+    """
+    all_cmds = _load_json_file(COMMANDS_FILE)
+    
+    clean_keys = set(k.strip().lower() for k in target_keys if k and str(k).strip())
+    if not clean_keys:
+        return False
+
+    action = command.get("action", "").upper()
 
     # تبدیل نماد تحلیل تکنیکال به نماد اجرایی بروکر
     if "symbol" in command:
         command["broker_symbol"] = resolve_broker_symbol(command["symbol"], user_cfg)
 
-    for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
+    target_sym = str(command.get("broker_symbol", command.get("symbol", ""))).strip().upper()
+
+    # ۱. فیلتر ضدتکرار و سقف ظرفیت برای سفارشات ورود (BUY / SELL)
+    if action in ["BUY", "SELL"]:
+        current_pending = get_user_pending_commands_count(list(clean_keys))
+        if current_pending >= 3:
+            print(f"🛑 [رد سفارش صف]: سقف ۳ سفارش همزمان در صف پر است.", flush=True)
+            return False
+
+        if is_symbol_in_pending_queue(list(clean_keys), target_sym):
+            print(f"🛑 [رد سفارش تکراری]: دستور معاملاتی برای نماد {target_sym} قبلاً در صف ثبت شده و منتظر اجراست.", flush=True)
+            return False
+
+    cmd_id = f"cmd_{int(time.time() * 1000)}_{os.urandom(2).hex()}"
+    command["cmd_id"] = cmd_id
+
+    for key in clean_keys:
         if key not in all_cmds:
             all_cmds[key] = []
         all_cmds[key].append(command)
 
     _save_json_file(COMMANDS_FILE, all_cmds)
+    return True
 
 
 def pop_pending_mt5_commands(identifier: str = "", login_str: str = "") -> List[Dict[str, Any]]:
