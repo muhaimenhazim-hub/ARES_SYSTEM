@@ -2,28 +2,34 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 14.0 (PERSISTENT REAL TRADES, MT5 LIVE SYNC & ZERO DATA LOSS)
+VERSION: 14.1 (PERSISTENT REAL TRADES, ZERO GHOST TRADES & SAFE DB ACCESS)
 ================================================================================
 """
 
 import hashlib
+import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+# تعریف آدرس کاملاً مطلق جهت جلوگیری دائمی از خطای unable to open database file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DB_PATH = os.path.join(BASE_DIR, "ares_trading.db")
+
 
 class AresDatabaseManager:
-    def __init__(self, db_path: str = "ares_trading.db"):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
         self._initialize_database()
-        self.clean_only_mock_data()
+        self.clean_all_ghost_trades()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=25.0)
+        # افزایش timeout به ۳۰ ثانیه برای جلوگیری از قفل همزمانی
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA busy_timeout = 10000;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
         return conn
 
     def _initialize_database(self):
@@ -59,7 +65,7 @@ class AresDatabaseManager:
                     trade_id VARCHAR(64) PRIMARY KEY,
                     user_id TEXT DEFAULT 'default',
                     mt5_ticket INTEGER DEFAULT 0,
-                    symbol VARCHAR(20) NOT NULL,
+                    symbol VARCHAR(30) NOT NULL,
                     market VARCHAR(30) NOT NULL,
                     side VARCHAR(10) NOT NULL,
                     entry_price REAL NOT NULL,
@@ -102,7 +108,7 @@ class AresDatabaseManager:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS setups_log (
                     setup_id VARCHAR(64) PRIMARY KEY,
-                    symbol VARCHAR(20) NOT NULL,
+                    symbol VARCHAR(30) NOT NULL,
                     setup_name VARCHAR(50) NOT NULL,
                     direction VARCHAR(10) NOT NULL,
                     score REAL NOT NULL,
@@ -114,7 +120,8 @@ class AresDatabaseManager:
             """)
 
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_identifier ON users(identifier);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_user ON trades(user_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticket ON trades(mt5_ticket);")
             conn.commit()
 
     @staticmethod
@@ -210,14 +217,8 @@ class AresDatabaseManager:
         now = datetime.now(timezone.utc).isoformat()
         existing = self.get_user_broker_config(user_id)
 
-        # اگر کاربر رمز عبور جدیدی وارد نکرده، رمز قبلی حفظ شود
-        mt5_pass = str(cfg.get("mt5_pass", "")).strip()
-        if not mt5_pass:
-            mt5_pass = existing.get("mt5_pass", "")
-
-        b_secret = str(cfg.get("binance_secret_key", "")).strip()
-        if not b_secret:
-            b_secret = existing.get("binance_secret_key", "")
+        mt5_pass = str(cfg.get("mt5_pass", "")).strip() or existing.get("mt5_pass", "")
+        b_secret = str(cfg.get("binance_secret_key", "")).strip() or existing.get("binance_secret_key", "")
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -280,30 +281,24 @@ class AresDatabaseManager:
             """)
             return [dict(r) for r in cursor.fetchall()]
 
-    def get_all_mt5_configured_users(self) -> List[Dict[str, Any]]:
-        """دریافت لیست کاربرانی که شماره حساب و رمز متاتریدر ۵ را وارد کرده‌اند (جهت اتصال خودکار سرور)"""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_pass, c.mt5_server, c.is_auto_trading
-                FROM user_broker_configs c
-                JOIN users u ON c.user_id = u.user_id
-                WHERE c.mt5_login != '' AND c.mt5_pass != '';
-            """)
-            return [dict(r) for r in cursor.fetchall()]
-
-    def clean_only_mock_data(self):
-        """حذف صرفاً داده‌های آزمایشی فیک بدون دست زدن به معاملات واقعی باز یا بسته کاربر"""
+    def clean_all_ghost_trades(self):
+        """حذف ۱۰۰٪ قطعی تمام معاملات شبح، تستی یا معاملات فاقد تیکت واقعی بروکر"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("DELETE FROM trades WHERE trade_id LIKE 'POS_TEST%' OR trade_id LIKE 'TEST%' OR trade_id LIKE 'MOCK%';")
+                cursor.execute("""
+                    DELETE FROM trades 
+                    WHERE trade_id LIKE 'POS_%' 
+                       OR trade_id LIKE 'TEST%' 
+                       OR trade_id LIKE 'MOCK%'
+                       OR (market = 'FOREX_OR_INDICES' AND (mt5_ticket IS NULL OR mt5_ticket <= 0));
+                """)
                 conn.commit()
         except Exception:
             pass
 
     def sync_mt5_live_positions(self, user_id: str, mt5_positions: List[Dict[str, Any]]):
-        """همگام‌سازی لحظه‌ای جدول پوزیشن‌های باز دشبورد با پوزیشن‌های واقعی داخل متاتریدر ۵"""
+        """همگام‌سازی مستقیم و بلادرنگ پوزیشن‌های متاتریدر ۵ به عنوان یگانه مرجع حقیقت (Single Source of Truth)"""
         if mt5_positions is None:
             return
         now = datetime.now(timezone.utc).isoformat()
@@ -316,7 +311,7 @@ class AresDatabaseManager:
                 if ticket <= 0:
                     continue
                 active_tickets.add(ticket)
-                symbol = str(p.get("symbol", "XAUUSD")).rstrip(".")
+                symbol = str(p.get("symbol", "XAUUSD"))
                 side = str(p.get("side", p.get("type", "BUY"))).upper()
                 entry_price = float(p.get("entry_price", p.get("price_open", 0.0)))
                 sl = float(p.get("sl", p.get("stop_loss", 0.0)))
@@ -329,9 +324,9 @@ class AresDatabaseManager:
                 if row:
                     cursor.execute("""
                         UPDATE trades 
-                        SET current_volume = ?, stop_loss = ?, realized_pnl = ?, status = 'OPEN'
+                        SET current_volume = ?, stop_loss = ?, tp1 = ?, realized_pnl = ?, status = 'OPEN'
                         WHERE trade_id = ?;
-                    """, (vol, sl, profit, row["trade_id"]))
+                    """, (vol, sl, tp, profit, row["trade_id"]))
                 else:
                     trade_id = f"MT5_{ticket}"
                     cursor.execute("""
@@ -343,7 +338,7 @@ class AresDatabaseManager:
                         ) VALUES (?, ?, ?, ?, 'FOREX_OR_INDICES', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, 0.0, 0, 'OPEN', ?);
                     """, (trade_id, user_id, ticket, symbol, side, entry_price, vol, vol, sl, sl, tp, tp, tp, profit, now))
 
-            # بستن معاملاتی که در متاتریدر بسته شده‌اند
+            # بستن خودکار معاملاتی که در متاتریدر توسط حد ضرر یا کاربر دستی بسته شده‌اند
             cursor.execute("SELECT trade_id, mt5_ticket FROM trades WHERE user_id = ? AND status = 'OPEN' AND mt5_ticket > 0;", (user_id,))
             for row in cursor.fetchall():
                 if int(row["mt5_ticket"]) not in active_tickets:
@@ -354,7 +349,7 @@ class AresDatabaseManager:
             conn.commit()
 
     def get_user_open_trades(self, user_id: str) -> List[Dict[str, Any]]:
-        """دریافت لیست واقعی معاملات باز کاربر جهت نمایش در جدول داشبورد"""
+        """دریافت لیست ۱۰۰٪ واقعی معاملات باز (فقط معاملات دارای تیکت معتبر متاتریدر یا سفارش واقعی بایننس)"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -362,19 +357,33 @@ class AresDatabaseManager:
                        initial_volume, current_volume, tp1, tp2, tp3, risk_amount_usd,
                        realized_pnl, total_fees, is_break_even, status, mt5_ticket, opened_at
                 FROM trades 
-                WHERE user_id = ? AND status = 'OPEN'
+                WHERE user_id = ? 
+                  AND status = 'OPEN'
+                  AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES')
+                  AND trade_id NOT LIKE 'POS_%'
                 ORDER BY opened_at DESC;
             """, (user_id,))
             return [dict(r) for r in cursor.fetchall()]
 
     def get_all_open_trades(self) -> List[Dict[str, Any]]:
-        """بازیابی تمام پوزیشن‌های باز هنگام روشن شدن مجدد سرور"""
+        """بازیابی پوزیشن‌های باز واقعی برای مدیریت لحظه‌ای"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM trades WHERE status = 'OPEN';")
+            cursor.execute("""
+                SELECT * FROM trades 
+                WHERE status = 'OPEN' 
+                  AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES')
+                  AND trade_id NOT LIKE 'POS_%';
+            """)
             return [dict(r) for r in cursor.fetchall()]
 
     def record_new_trade(self, pos_data: Dict[str, Any], user_id: str = "default"):
+        # اگر پوزیشن فاقد تیکت واقعی بروکر یا بایننس باشد، به هیچ وجه در دیتابیس ثبت نمی‌شود
+        ticket = int(pos_data.get("mt5_ticket", 0))
+        market = pos_data.get("market", "")
+        if market == "FOREX_OR_INDICES" and ticket <= 0:
+            return
+
         targets = pos_data.get("targets", {})
         tp1 = targets.get("tp1", pos_data.get("tp1", 0.0))
         tp2 = targets.get("tp2", pos_data.get("tp2", 0.0))
@@ -392,7 +401,7 @@ class AresDatabaseManager:
             """, (
                 pos_data["position_id"],
                 user_id,
-                int(pos_data.get("mt5_ticket", 0)),
+                ticket,
                 pos_data["symbol"],
                 pos_data["market"],
                 pos_data["side"],
@@ -461,13 +470,16 @@ class AresDatabaseManager:
             cursor = conn.cursor()
 
             if user_id:
-                cursor.execute("SELECT COUNT(*) FROM trades WHERE user_id = ? AND status = 'OPEN';", (user_id,))
+                cursor.execute("""
+                    SELECT COUNT(*) FROM trades 
+                    WHERE user_id = ? AND status = 'OPEN' AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES');
+                """, (user_id,))
                 open_trades = cursor.fetchone()[0]
 
                 cursor.execute("""
                     SELECT SUM(realized_pnl), SUM(total_fees) 
                     FROM trades 
-                    WHERE user_id = ? AND status = 'CLOSED';
+                    WHERE user_id = ? AND status = 'CLOSED' AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES');
                 """, (user_id,))
                 row = cursor.fetchone()
             else:

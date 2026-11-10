@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.0 (STRICT USER ISOLATION, AUTO-TERMINAL BRIDGE & BINANCE LIVE EXEC)
+VERSION: 14.1 (DYNAMIC BROKER SYMBOL RESOLUTION & AUTO-TERMINAL BRIDGE)
 ================================================================================
 """
 
@@ -11,11 +11,20 @@ import os
 import time
 from typing import Dict, Any, Tuple, List, Optional
 
-CONFIG_FILE = "ares_user_config.json"
-BRIDGE_CACHE_FILE = "ares_bridge_cache.json"
-COMMANDS_FILE = "ares_mt5_pending_commands.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, "ares_user_config.json")
+BRIDGE_CACHE_FILE = os.path.join(BASE_DIR, "ares_bridge_cache.json")
+COMMANDS_FILE = os.path.join(BASE_DIR, "ares_mt5_pending_commands.json")
 
 BRIDGE_LIVE_DATA: Dict[str, Dict[str, Any]] = {}
+
+# جدول نگاشت نمادهای استاندارد تحلیل تکنیکال به اسامی مرسوم در انواع بروکرهای متاتریدر
+BROKER_SYMBOL_ALIASES = {
+    "EURUSD": ["EURUSD.", "EURUSD", "EURUSD_i", "EURUSDm", "EURUSD.pro", "EURUSDraw"],
+    "XAUUSD": ["XAUUSD.", "XAUUSD", "GOLD", "GOLD.", "XAUUSD_i", "XAUUSDm", "GOLDm"],
+    "NASDAQ 100": ["NAS100", "NAS100.", "USTEC", "USTEC.", "US100", "US100.", "NQ", "NQ=F", "NASDAQ"],
+    "S&P 500": ["US500", "US500.", "SP500", "SP500.", "ES", "ES=F", "SPX500"],
+}
 
 
 def _load_json_file(file_path: str) -> Dict[str, Any]:
@@ -40,7 +49,7 @@ def _save_json_file(file_path: str, data: Dict[str, Any]) -> None:
 
 
 def update_bridge_data(identifier: str, data: Dict[str, Any]):
-    """دریافت زنده دیتای حساب، پوزیشن‌های باز و تاریخچه سود از متاتریدر"""
+    """دریافت زنده دیتای حساب، پوزیشن‌های واقعی و لیست نمادهای فعال از متاتریدر"""
     now_ts = time.time()
     data["last_sync_ts"] = now_ts
 
@@ -60,7 +69,7 @@ def update_bridge_data(identifier: str, data: Dict[str, Any]):
 
 
 def get_user_bridge_snapshot(user_cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """دریافت اطلاعات زنده متاتریدر مختص همان کاربر (بدون نشت اطلاعات بین کاربران)"""
+    """دریافت اطلاعات زنده متاتریدر مختص همان کاربر"""
     if not user_cfg:
         return None
 
@@ -71,26 +80,58 @@ def get_user_bridge_snapshot(user_cfg: Dict[str, Any]) -> Optional[Dict[str, Any
     merged_data = _load_json_file(BRIDGE_CACHE_FILE)
     merged_data.update(BRIDGE_LIVE_DATA)
 
-    # ۱. تطابق دقیق با شماره حساب متاتریدر ثبت‌شده در تنظیمات کاربر
     if m_login and m_login in merged_data:
         return merged_data[m_login]
 
-    # ۲. تطابق دقیق با شناسه کاربری (ایمیل یا شماره موبایل)
     if user_ident and user_ident in merged_data:
         return merged_data[user_ident]
 
-    # ۳. تطابق با شناسه داخلی
     if user_id and user_id in merged_data:
         return merged_data[user_id]
 
     return None
 
 
-def queue_mt5_command(target_keys: List[str], command: Dict[str, Any]):
-    """ثبت دستور معاملاتی در صف متاتریدر با کلیدهای یکتا جهت تضمین تحویل ۱۰۰٪"""
+def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """
+    شناسایی خودکار و هوشمند پسوند/پیشوند بروکر کاربر.
+    مثال: اگر در متاتریدر کاربر نماد 'EURUSD.' است، به صورت خودکار به 'EURUSD.' تبدیل می‌شود.
+    """
+    clean_sym = canonical_symbol.strip()
+    aliases = BROKER_SYMBOL_ALIASES.get(clean_sym, [clean_sym])
+
+    # ۱. اگر متاتریدر لیست نمادهای فعال یا پوزیشن‌های باز خود را فرستاده است، تطابق دقیق بده
+    bridge = get_user_bridge_snapshot(user_cfg) if user_cfg else None
+    if bridge:
+        known_symbols = bridge.get("active_symbols", [])
+        if "open_positions" in bridge and isinstance(bridge["open_positions"], list):
+            known_symbols.extend([p.get("symbol") for p in bridge["open_positions"] if p.get("symbol")])
+
+        for alias in aliases:
+            for s in known_symbols:
+                if str(s).strip().upper() == alias.upper():
+                    return str(s).strip()
+
+        # بررسی سرور یا نام بروکر (مثلاً بروکرهایی مثل Aron Markets که نقطه دارند)
+        broker_name = str(bridge.get("broker", "")).lower()
+        server_name = str(bridge.get("server", "")).lower()
+        if "aron" in broker_name or "aron" in server_name:
+            if clean_sym in ["EURUSD", "XAUUSD"]:
+                return f"{clean_sym}."
+
+    # پیش‌فرض: اولین نام معتبر در بروکرهای استاندارد
+    return aliases[0]
+
+
+def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg: Optional[Dict[str, Any]] = None):
+    """ثبت دستور معاملاتی در صف متاتریدر با نماد دقیق بروکر کاربر"""
     all_cmds = _load_json_file(COMMANDS_FILE)
     cmd_id = f"cmd_{int(time.time() * 1000)}_{os.urandom(2).hex()}"
     command["cmd_id"] = cmd_id
+
+    # تبدیل نماد تحلیل تکنیکال به نماد اجرایی بروکر
+    if "symbol" in command:
+        command["broker_symbol"] = resolve_broker_symbol(command["symbol"], user_cfg)
 
     for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
         if key not in all_cmds:
@@ -101,7 +142,7 @@ def queue_mt5_command(target_keys: List[str], command: Dict[str, Any]):
 
 
 def pop_pending_mt5_commands(identifier: str = "", login_str: str = "") -> List[Dict[str, Any]]:
-    """تحویل دستورات به متاتریدر و حذف همزمان از تمام کلیدهای متناظر جهت جلوگیری از تکرار"""
+    """تحویل دستورات به متاتریدر و جلوگیری از اجرای تکراری"""
     clean_id = str(identifier).strip().lower()
     clean_login = str(login_str).strip().lower()
 
@@ -121,7 +162,6 @@ def pop_pending_mt5_commands(identifier: str = "", login_str: str = "") -> List[
             modified = True
 
     if modified:
-        # پاکسازی دستورات تحویل‌شده از سایر کلیدها
         for k in list(all_cmds.keys()):
             all_cmds[k] = [c for c in all_cmds[k] if c.get("cmd_id", str(c)) not in seen_ids]
         _save_json_file(COMMANDS_FILE, all_cmds)
@@ -130,7 +170,7 @@ def pop_pending_mt5_commands(identifier: str = "", login_str: str = "") -> List[
 
 
 def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, bool]:
-    """بررسی وضعیت اتصال و موجودی زنده حساب کاربر (متاتریدر ۵ یا بایننس)"""
+    """بررسی وضعیت اتصال و خواندن دقیق موجودی زنده از متاتریدر یا بایننس"""
     if not user_cfg:
         return 0.0, "حساب متصل نیست", "جهت اتصال از بخش تنظیمات حساب استفاده کنید.", False
 
@@ -145,16 +185,14 @@ def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, 
         login_num = bridge.get("login", m_login)
         return eq, f"اکانت متاتریدر {login_num} (متصل)", f"بروکر: {company} | سرور: {server} | ارتباط برخط ۲۴ ساعته فعال", True
 
-    # اگر کاربر اطلاعات متاتریدر را در سایت ذخیره کرده و منتظر همگام‌سازی اولیه ترمینال سرور است
     if m_login:
         return (
             0.0,
             f"اکانت متاتریدر {m_login} (در حال همگام‌سازی...)",
-            f"سرور: {m_server or 'پیش‌فرض'} | در انتظار دریافت اولین تیک از متاتریدر سرور",
+            f"سرور: {m_server or 'پیش‌فرض'} | در انتظار دریافت اولین تیک از متاتریدر",
             False,
         )
 
-    # بررسی حساب بایننس فیوچرز
     b_key = str(user_cfg.get("binance_api_key", "")).strip()
     b_secret = str(user_cfg.get("binance_secret_key", "")).strip()
     if b_key and b_secret:
@@ -171,13 +209,12 @@ def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, 
             real_equity = float(balance_info.get("total", {}).get("USDT", 0.0))
             return real_equity, "بایننس فیوچرز (زنده)", f"صرافی متصل: بایننس | موجودی: {real_equity:.2f} USDT", True
         except Exception:
-            return 0.0, "خطای اتصال بایننس", "کلیدهای API بایننس نامعتبر هستند یا دسترسی Futures ندارند.", False
+            return 0.0, "خطای اتصال بایننس", "کلیدهای API بایننس نامعتبر هستند.", False
 
     return 0.0, "حساب معاملاتی متصل نیست", "از دکمه «تنظیمات حساب» اطلاعات متاتریدر ۵ یا بایننس خود را وارد کنید.", False
 
 
 def execute_binance_order(user_cfg: Dict[str, Any], symbol: str, side: str, volume: float, stop_loss: float = 0.0, take_profit: float = 0.0) -> Tuple[bool, str]:
-    """اجرای واقعی سفارش در بایننس فیوچرز برای کاربران کریپتو"""
     b_key = str(user_cfg.get("binance_api_key", "")).strip()
     b_secret = str(user_cfg.get("binance_secret_key", "")).strip()
     if not b_key or not b_secret:

@@ -2,10 +2,11 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 14.0 (CRASH-PROOF, DB POSITION RECOVERY & RELIABLE MT5/BINANCE ROUTING)
+VERSION: 14.1 (ZERO GHOST TRADES, DYNAMIC BROKER SYMBOLS & DB CRASH-PROOF)
 ================================================================================
 """
 
+import os
 import sys
 import time
 import traceback
@@ -31,7 +32,7 @@ from market_data_connector import AresUnifiedDataService
 
 class AresMasterSystem:
     SYMBOLS_SPECS = {
-        # فارکس، انس طلا و شاخص‌ها (مخصوص متاتریدر ۵)
+        # فارکس، انس طلا و شاخص‌ها (مخصوص متاتریدر ۵ با قابلیت تطبیق خودکار پسوند بروکر)
         "XAUUSD": ContractSpecs("XAUUSD", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=100.0, min_notional_usd=1.0, leverage=100.0),
         "EURUSD": ContractSpecs("EURUSD", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.00001, contract_size=100000.0, min_notional_usd=1.0, leverage=100.0),
         "NASDAQ 100": ContractSpecs("NASDAQ 100", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
@@ -47,7 +48,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۰ - پایدار و ۲۴ ساعته)")
+        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۱ - معاملات واقعی بروکر، بدون شبح)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -60,8 +61,9 @@ class AresMasterSystem:
         self.risk_engine = RiskManagementPortfolioEngine(initial_capital=100.0)
         self.trade_engine = TradePositionManagementEngine(mode=ExecutionMode.LIVE)
         self.last_scan_time: float = 0.0
+        self.last_db_sync_time: float = 0.0
 
-        # بازیابی معاملات باز از دیتابیس در صورت ری‌استارت شدن سرور
+        # بازیابی پوزیشن‌های واقعی دارای تیکت متاتریدر
         self._restore_open_positions_from_db()
 
     def _restore_open_positions_from_db(self):
@@ -70,9 +72,11 @@ class AresMasterSystem:
             for row in open_rows:
                 self.trade_engine.restore_position_from_db(row)
             if open_rows:
-                print(f"✅ تعداد {len(open_rows)} پوزیشن باز از دیتابیس بازیابی و تحت مدیریت قرار گرفت.")
+                print(f"✅ تعداد {len(open_rows)} پوزیشن واقعی از دیتابیس بازیابی شد.")
+            else:
+                print("✨ دیتابیس کاملاً تمیز است؛ هیچ پوزیشن شبحی وجود ندارد.")
         except Exception as e:
-            print(f"⚠️ خطا در بازیابی پوزیشن‌های باز: {e}")
+            print(f"⚠️ خطا در بازیابی اولیه: {e}")
 
     def _get_user_routing_keys(self, user_id: str) -> List[str]:
         cfg = self.db.get_user_broker_config(user_id)
@@ -84,11 +88,12 @@ class AresMasterSystem:
         return [k.strip().lower() for k in keys if k and str(k).strip()]
 
     def manage_active_positions_fast(self):
+        """مدیریت هوشمند خروج پله‌ای و تریلینگ استاپ پوزیشن‌های واقعی"""
         if not self.trade_engine.open_positions:
             return
 
+        now = time.time()
         for pos_id, pos in list(self.trade_engine.open_positions.items()):
-            # اگر پوزیشن مستقیماً توسط متاتریدر همگام‌سازی شده (با پیشوند MT5_)، مدیریت آن با بروکر/تیک است
             bundle = self.data_service.get_live_multitimeframe_bundle(pos.symbol)
             if not bundle:
                 continue
@@ -120,20 +125,9 @@ class AresMasterSystem:
                         "ticket": getattr(pos, "mt5_ticket", 0),
                     })
 
-                if pos.partial_exits:
-                    last_exit = pos.partial_exits[-1]
-                    self.db.record_partial_exit({
-                        "exit_id": last_exit.exit_id,
-                        "target_name": last_exit.target_name,
-                        "exit_price": last_exit.exit_price,
-                        "closed_volume": last_exit.closed_volume,
-                        "realized_pnl": last_exit.realized_pnl,
-                        "fee_paid": last_exit.fee_paid,
-                    }, trade_id=pos.position_id)
-
             if update.get("status") == "CLOSED":
                 pnl = update["position"]["realized_pnl"]
-                print(f"\n🔔 [تسویه پوزیشن {pos.symbol}]: سود/زیان نهایی = {pnl:+.2f}$", flush=True)
+                print(f"\n🔔 [تسویه معامله بروکر {pos.symbol}]: سود/زیان = {pnl:+.2f}$", flush=True)
 
                 account_config.queue_mt5_command(target_keys, {
                     "action": "CLOSE",
@@ -141,11 +135,13 @@ class AresMasterSystem:
                     "ticket": getattr(pos, "mt5_ticket", 0),
                 })
                 self.db.record_new_trade(update["position"], user_id=pos.user_id)
-            elif update.get("status") == "OPEN":
-                # به‌روزرسانی سود/زیان لحظه‌ای در دیتابیس برای نمایش زنده در جدول دشبورد
+            elif update.get("status") == "OPEN" and (now - self.last_db_sync_time > 10.0):
+                # به‌روزرسانی کنترل‌شده در دیتابیس (هر ۱۰ ثانیه یکبار به جای هر ثانیه)
                 self.db.record_new_trade(update["position"], user_id=pos.user_id)
+                self.last_db_sync_time = now
 
     def scan_for_opportunities(self):
+        """اسکن بازار و ارسال مستقیم سفارشات تایید شده به متاتریدر ۵ بروکر"""
         active_users = self.db.get_auto_trading_users()
         if not active_users:
             return
@@ -160,6 +156,7 @@ class AresMasterSystem:
             is_mt5_connected = ("متاتریدر" in acc_info) or bool(user.get("mt5_login"))
             is_binance_connected = bool(user.get("binance_api_key") and user.get("binance_secret_key"))
 
+            # بررسی تعداد معاملات واقعی باز کاربر در بروکر (سقف مجاز: ۳ معامله)
             active_trades_db = self.db.get_user_open_trades(user_id=user_id)
             if len(active_trades_db) >= 3:
                 continue
@@ -167,11 +164,8 @@ class AresMasterSystem:
             for symbol, specs in self.SYMBOLS_SPECS.items():
                 is_crypto = symbol in self.data_service.binance.CRYPTO_SYMBOLS
 
-                # فیلتر ۱: اگر کاربر متاتریدر دارد و بایننس ندارد، کریپتو اسکن نشود
                 if is_crypto and not is_binance_connected:
                     continue
-
-                # فیلتر ۲: اگر کاربر فقط بایننس دارد و متاتریدر ندارد، فارکس و طلا اسکن نشوند
                 if not is_crypto and not is_mt5_connected:
                     continue
 
@@ -179,7 +173,9 @@ class AresMasterSystem:
                 if len(current_active) >= 3:
                     break
 
-                if any(t["symbol"].rstrip(".") == symbol.rstrip(".") for t in current_active):
+                # جلوگیری از ورود همزمان دو معامله روی یک جفت‌ارز
+                clean_sym = symbol.replace(" ", "").rstrip(".")
+                if any(t["symbol"].replace(" ", "").rstrip(".") == clean_sym for t in current_active):
                     continue
 
                 news_status = self.news_filter.is_news_restricted(symbol)
@@ -209,50 +205,43 @@ class AresMasterSystem:
                     risk_decision = self.risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
 
                     if risk_decision.approved:
-                        success, pos, msg = self.trade_engine.open_position(
-                            symbol=symbol,
-                            market=market_type,
-                            side_str=opportunity.direction,
-                            entry_price=opportunity.entry_price,
-                            stop_loss=opportunity.stop_loss,
-                            tp1=opportunity.take_profit_1,
-                            tp2=opportunity.take_profit_2,
-                            tp3=opportunity.take_profit_3,
-                            allocated_volume=risk_decision.calculated_volume,
-                            risk_usd=risk_decision.risk_amount_usd,
-                            user_id=user_id,
-                        )
-                        if success and pos:
-                            print(f"\n🔥 [سیگنال واقعی تایید شد]: {symbol} ({opportunity.direction}) | حجم: {risk_decision.calculated_volume}", flush=True)
-                            self.db.record_new_trade(pos.to_dict(), user_id=user_id)
+                        vol = round(risk_decision.calculated_volume, 2)
+                        if vol < specs.min_volume:
+                            vol = specs.min_volume
 
-                            if is_crypto and is_binance_connected:
-                                account_config.execute_binance_order(
-                                    user,
-                                    symbol=symbol,
-                                    side=opportunity.direction,
-                                    volume=risk_decision.calculated_volume,
-                                    stop_loss=opportunity.stop_loss,
-                                    take_profit=opportunity.take_profit_1,
-                                )
-                            else:
-                                target_keys = [
-                                    user_id,
-                                    str(user.get("identifier", "")),
-                                    str(user.get("mt5_login", "")),
-                                ]
-                                account_config.queue_mt5_command(target_keys, {
-                                    "action": opportunity.direction,
-                                    "symbol": symbol,
-                                    "volume": round(risk_decision.calculated_volume, 2),
-                                    "sl": round(opportunity.stop_loss, 5),
-                                    "tp": round(opportunity.take_profit_1, 5),
-                                    "trade_id": pos.position_id,
-                                })
+                        # ارسال واقعی سفارش به بایننس یا متاتریدر ۵ بروکر
+                        if is_crypto and is_binance_connected:
+                            success, order_id = account_config.execute_binance_order(
+                                user,
+                                symbol=symbol,
+                                side=opportunity.direction,
+                                volume=vol,
+                                stop_loss=opportunity.stop_loss,
+                                take_profit=opportunity.take_profit_1,
+                            )
+                            if success:
+                                print(f"\n🚀 [سفارش بایننس اجرا شد]: {symbol} | شناسه: {order_id}", flush=True)
+                        else:
+                            # استخراج نماد واقعی مطابق با بروکر متاتریدر (شامل پسوندهایی مثل نقطه .)
+                            broker_symbol = account_config.resolve_broker_symbol(symbol, user)
+                            target_keys = self._get_user_routing_keys(user_id)
+
+                            print(f"\n📡 [سیگنال تایید شد -> ارسال مستقیم به متاتریدر ۵ بروکر]:", flush=True)
+                            print(f"   نماد بروکر: {broker_symbol} | جهت: {opportunity.direction} | حجم: {vol} لات", flush=True)
+                            print(f"   ورود: {opportunity.entry_price} | حد ضرر: {opportunity.stop_loss} | حد سود: {opportunity.take_profit_1}", flush=True)
+
+                            # ثبت سفارش در صف متاتریدر (بدون ثبت معامله فیک قبل از اجرا)
+                            account_config.queue_mt5_command(target_keys, {
+                                "action": opportunity.direction,
+                                "symbol": broker_symbol,
+                                "volume": vol,
+                                "sl": round(opportunity.stop_loss, 5),
+                                "tp": round(opportunity.take_profit_1, 5),
+                            }, user_cfg=user)
 
     def run_loop(self):
-        print("\n🚀 ناظر هوشمند ۲۴ ساعته با تفکیک دقیق بازارها فعال شد.\n", flush=True)
-        scan_interval = 5.0
+        print("\n🚀 ناظر هوشمند ۲۴ ساعته (حالت معاملات ۱۰۰٪ واقعی بروکر) فعال شد.\n", flush=True)
+        scan_interval = 4.0
         self.last_scan_time = 0.0
 
         while True:
@@ -269,7 +258,7 @@ class AresMasterSystem:
             except KeyboardInterrupt:
                 sys.exit(0)
             except Exception as e:
-                print(f"⚠️ خطای موقت در حلقه اصلی (سیستم به کار ادامه می‌دهد): {e}", flush=True)
+                print(f"⚠️ پیام سیستم: {e}", flush=True)
                 time.sleep(2.0)
 
 
