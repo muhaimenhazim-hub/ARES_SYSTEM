@@ -1,12 +1,16 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PORT=80
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 7860
+EXPOSE 80
 
-CMD ["uvicorn", "ares_dashboard:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["sh", "-c", "python3 main.py & python3 ares_dashboard.py"]

@@ -1,7 +1,13 @@
 venv/
+.venv/
 __pycache__/
+*.py[cod]
 *.db
 *.db-shm
 *.db-wal
+*.log
+*.tmp
 .env
 ares_user_config.json
+ares_bridge_cache.json
+ares_mt5_pending_commands.json
