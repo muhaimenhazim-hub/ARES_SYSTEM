@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 14.1 (PERSISTENT REAL TRADES, ZERO GHOST TRADES & SAFE DB ACCESS)
+VERSION: 14.2 (MULTI-TENANT SUPPORT, PERSISTENT REAL TRADES, ZERO GHOST TRADES)
 ================================================================================
 """
 
@@ -12,7 +12,6 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-# تعریف آدرس کاملاً مطلق جهت جلوگیری دائمی از خطای unable to open database file
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_PATH = os.path.join(BASE_DIR, "ares_trading.db")
 
@@ -24,7 +23,6 @@ class AresDatabaseManager:
         self.clean_all_ghost_trades()
 
     def _get_connection(self) -> sqlite3.Connection:
-        # افزایش timeout به ۳۰ ثانیه برای جلوگیری از قفل همزمانی
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
@@ -281,8 +279,19 @@ class AresDatabaseManager:
             """)
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_all_mt5_configured_users(self) -> List[Dict[str, Any]]:
+        """دریافت تمام کاربرانی که مشخصات متاتریدر ۵ را ثبت کرده‌اند"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_pass, c.mt5_server, c.is_auto_trading
+                FROM user_broker_configs c
+                JOIN users u ON c.user_id = u.user_id
+                WHERE c.mt5_login != '' AND c.mt5_pass != '';
+            """)
+            return [dict(r) for r in cursor.fetchall()]
+
     def clean_all_ghost_trades(self):
-        """حذف ۱۰۰٪ قطعی تمام معاملات شبح، تستی یا معاملات فاقد تیکت واقعی بروکر"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -298,7 +307,6 @@ class AresDatabaseManager:
             pass
 
     def sync_mt5_live_positions(self, user_id: str, mt5_positions: List[Dict[str, Any]]):
-        """همگام‌سازی مستقیم و بلادرنگ پوزیشن‌های متاتریدر ۵ به عنوان یگانه مرجع حقیقت (Single Source of Truth)"""
         if mt5_positions is None:
             return
         now = datetime.now(timezone.utc).isoformat()
@@ -338,7 +346,6 @@ class AresDatabaseManager:
                         ) VALUES (?, ?, ?, ?, 'FOREX_OR_INDICES', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, 0.0, 0, 'OPEN', ?);
                     """, (trade_id, user_id, ticket, symbol, side, entry_price, vol, vol, sl, sl, tp, tp, tp, profit, now))
 
-            # بستن خودکار معاملاتی که در متاتریدر توسط حد ضرر یا کاربر دستی بسته شده‌اند
             cursor.execute("SELECT trade_id, mt5_ticket FROM trades WHERE user_id = ? AND status = 'OPEN' AND mt5_ticket > 0;", (user_id,))
             for row in cursor.fetchall():
                 if int(row["mt5_ticket"]) not in active_tickets:
@@ -349,7 +356,6 @@ class AresDatabaseManager:
             conn.commit()
 
     def get_user_open_trades(self, user_id: str) -> List[Dict[str, Any]]:
-        """دریافت لیست ۱۰۰٪ واقعی معاملات باز (فقط معاملات دارای تیکت معتبر متاتریدر یا سفارش واقعی بایننس)"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -366,7 +372,6 @@ class AresDatabaseManager:
             return [dict(r) for r in cursor.fetchall()]
 
     def get_all_open_trades(self) -> List[Dict[str, Any]]:
-        """بازیابی پوزیشن‌های باز واقعی برای مدیریت لحظه‌ای"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -378,7 +383,6 @@ class AresDatabaseManager:
             return [dict(r) for r in cursor.fetchall()]
 
     def record_new_trade(self, pos_data: Dict[str, Any], user_id: str = "default"):
-        # اگر پوزیشن فاقد تیکت واقعی بروکر یا بایننس باشد، به هیچ وجه در دیتابیس ثبت نمی‌شود
         ticket = int(pos_data.get("mt5_ticket", 0))
         market = pos_data.get("market", "")
         if market == "FOREX_OR_INDICES" and ticket <= 0:
