@@ -9,6 +9,7 @@ VERSION: 14.2 (MULTI-TENANT SUPPORT, PERSISTENT REAL TRADES, ZERO GHOST TRADES)
 import hashlib
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -22,13 +23,21 @@ class AresDatabaseManager:
         self._initialize_database()
         self.clean_all_ghost_trades()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self):
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA busy_timeout = 30000;")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _initialize_database(self):
         with self._get_connection() as conn:
@@ -120,7 +129,6 @@ class AresDatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_identifier ON users(identifier);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticket ON trades(mt5_ticket);")
-            conn.commit()
 
     @staticmethod
     def _hash_pw(password: str) -> str:
@@ -143,7 +151,6 @@ class AresDatabaseManager:
                     "INSERT INTO user_broker_configs (user_id, updated_at) VALUES (?, ?);",
                     (user_id, now),
                 )
-                conn.commit()
                 return {"user_id": user_id, "identifier": clean_id}
         except sqlite3.IntegrityError:
             return None
@@ -244,7 +251,6 @@ class AresDatabaseManager:
                 existing.get("is_auto_trading", 0),
                 now,
             ))
-            conn.commit()
 
     def toggle_auto_trading(self, user_id: str) -> bool:
         with self._get_connection() as conn:
@@ -253,7 +259,6 @@ class AresDatabaseManager:
             row = cursor.fetchone()
             new_val = 1 if (not row or row[0] == 0) else 0
             cursor.execute("UPDATE user_broker_configs SET is_auto_trading = ? WHERE user_id = ?;", (new_val, user_id))
-            conn.commit()
             return bool(new_val)
 
     def disconnect_broker(self, user_id: str):
@@ -264,7 +269,6 @@ class AresDatabaseManager:
                 SET binance_api_key = '', binance_secret_key = '', mt5_login = '', mt5_pass = '', mt5_server = '', is_auto_trading = 0 
                 WHERE user_id = ?;
             """, (user_id,))
-            conn.commit()
 
     def get_auto_trading_users(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -280,7 +284,6 @@ class AresDatabaseManager:
             return [dict(r) for r in cursor.fetchall()]
 
     def get_all_mt5_configured_users(self) -> List[Dict[str, Any]]:
-        """دریافت تمام کاربرانی که مشخصات متاتریدر ۵ را ثبت کرده‌اند"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -302,7 +305,6 @@ class AresDatabaseManager:
                        OR trade_id LIKE 'MOCK%'
                        OR (market = 'FOREX_OR_INDICES' AND (mt5_ticket IS NULL OR mt5_ticket <= 0));
                 """)
-                conn.commit()
         except Exception:
             pass
 
@@ -353,7 +355,6 @@ class AresDatabaseManager:
                         UPDATE trades SET status = 'CLOSED', closed_at = ?, exit_reason = 'MT5_CLOSED'
                         WHERE trade_id = ?;
                     """, (now, row["trade_id"]))
-            conn.commit()
 
     def get_user_open_trades(self, user_id: str) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -426,7 +427,6 @@ class AresDatabaseManager:
                 pos_data["open_time"],
                 pos_data.get("close_time"),
             ))
-            conn.commit()
 
     def record_partial_exit(self, exit_record: Dict[str, Any], trade_id: str):
         with self._get_connection() as conn:
@@ -446,7 +446,6 @@ class AresDatabaseManager:
                 exit_record["fee_paid"],
                 exit_record.get("timestamp", datetime.now(timezone.utc).isoformat()),
             ))
-            conn.commit()
 
     def record_setup_evaluation(self, opp_data: Dict[str, Any]):
         with self._get_connection() as conn:
@@ -467,7 +466,6 @@ class AresDatabaseManager:
                 opp_data.get("rejection_reason"),
                 opp_data["timestamp"],
             ))
-            conn.commit()
 
     def get_portfolio_summary(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         with self._get_connection() as conn:
