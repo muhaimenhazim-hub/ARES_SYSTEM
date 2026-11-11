@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 14.4 (PERFECT MULTI-TENANT CLOUD ISOLATION & ZERO-POPUP RUNTIME)
+VERSION: 14.5 (UNIVERSAL BROKER SUPPORT & PID-FILE SUPERVISOR)
 ================================================================================
 """
 
@@ -18,12 +18,19 @@ INSTANCES_DIR = "/root/mt5_instances"
 BASE_MT5_DIR = "/root/.wine/drive_c/Program Files/MetaTrader 5"
 GLOBAL_CONFIG_SRC = "/root/mt5_config"
 
+# جدول نگاشت هوشمند بروکرهای جهانی به درگاه‌های دسترسی مستقیم
+UNIVERSAL_BROKER_MAP = {
+    "metaquotes-demo": "access.metatrader5.com:443",
+    "metaquotes": "access.metatrader5.com:443",
+    "aronmarkets-demo": "AronMarkets-Demo",
+    "aronmarkets-live": "AronMarkets-Live",
+}
+
 
 class AresMT5MultiManager:
     """
-    ناظر و مدیر خودکار متاتریدر ۵ برای تمام کاربران سامانه ARES.
-    هر کاربری که مشخصات لاگین متاتریدر را در سایت وارد کند،
-    این ماژول به صورت ۱۰۰٪ خودکار یک متاتریدر کاملاً ایزوله برای او در سرور بالا می‌آورد.
+    ناظر خودکار متاتریدر ۵ با پشتیبانی از تمامی بروکرهای معتبر جهان
+    و سیستم اختصاصی رصد پروسه‌ها از طریق PID فایل.
     """
 
     def __init__(self, db: Optional[AresDatabaseManager] = None):
@@ -39,34 +46,56 @@ class AresMT5MultiManager:
             return []
 
     def is_login_running(self, login: str) -> bool:
-        """بررسی دقیق فعال بودن متاتریدر اختصاصی این کاربر در سرور بدون باگ جستجوی شل"""
+        """بررسی دقیق و بدون خطای روشن بودن متاتریدر با استفاده از فایل PID"""
         clean_login = str(login).strip()
         if not clean_login:
             return False
+
+        user_dir = os.path.join(INSTANCES_DIR, clean_login)
+        pid_file = os.path.join(user_dir, "mt5.pid")
+
+        # ۱. بررسی سلامت از روی فایل PID اختصاصی کاربر
+        if os.path.exists(pid_file):
+            try:
+                with open(pid_file, "r") as f:
+                    pid = int(f.read().strip())
+                # بررسی اینکه آیا پروسه هنوز در لینوکس زنده است
+                os.kill(pid, 0)
+                return True
+            except (OSError, ValueError):
+                # پروسه بسته شده؛ فایل قدیمی پاک می‌شود
+                try:
+                    os.remove(pid_file)
+                except Exception:
+                    pass
+
+        # ۲. بررسی تکمیلی از طریق لیست پروسه‌های سیستم
         try:
-            res1 = subprocess.run(["pgrep", "-f", f"mt5_{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if res1.returncode == 0:
+            res = subprocess.run(["pgrep", "-f", f"mt5_instances/{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode == 0 and res.stdout.strip():
                 return True
-            res2 = subprocess.run(["pgrep", "-f", f"mt5_instances/{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if res2.returncode == 0:
-                return True
-            # بررسی پروسه اختصاصی اکانت 300260 در مسیر اصلی
+
             if clean_login == "300260":
                 res3 = subprocess.run(["pgrep", "-f", "MetaTrader 5/terminal64.exe"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if res3.returncode == 0:
+                if res3.returncode == 0 and res3.stdout.strip():
                     return True
-            return False
         except Exception:
-            return False
+            pass
+
+        return False
 
     def setup_user_environment(self, user: Dict[str, Any]) -> Optional[str]:
-        """آماده‌سازی خودکار پوشه و فایل‌های اجرایی اختصاصی و ایزوله برای این کاربر"""
+        """آماده‌سازی خودکار پوشه ایزوله و فایل کانفیگ برای هر بروکر در دنیا"""
         login = str(user.get("mt5_login", "")).strip()
         password = str(user.get("mt5_pass", "")).strip()
-        server = str(user.get("mt5_server", "MetaQuotes-Demo")).strip() or "MetaQuotes-Demo"
+        server_raw = str(user.get("mt5_server", "MetaQuotes-Demo")).strip() or "MetaQuotes-Demo"
 
         if not login or not password:
             return None
+
+        # تبدیل هوشمند نام بروکر به درگاه اتصال رسمی در صورت نیاز
+        server_lower = server_raw.lower()
+        server_endpoint = UNIVERSAL_BROKER_MAP.get(server_lower, server_raw)
 
         user_dir = os.path.join(INSTANCES_DIR, login)
         config_dir = os.path.join(user_dir, "config")
@@ -75,7 +104,7 @@ class AresMT5MultiManager:
         os.makedirs(config_dir, exist_ok=True)
         os.makedirs(experts_dir, exist_ok=True)
 
-        # ۱. لینک یا کپی فایل‌های باینری متاتریدر
+        # ۱. پیوند فایل‌های اجرایی متاتریدر به پوشه اختصاصی کاربر
         if os.path.exists(BASE_MT5_DIR):
             for fname in os.listdir(BASE_MT5_DIR):
                 src = os.path.join(BASE_MT5_DIR, fname)
@@ -90,7 +119,6 @@ class AresMT5MultiManager:
                             except Exception:
                                 pass
 
-            # پوشه‌های کمکی مورد نیاز
             for folder in ["profiles", "templates", "help", "sounds"]:
                 src_f = os.path.join(BASE_MT5_DIR, folder)
                 dst_f = os.path.join(user_dir, folder)
@@ -100,7 +128,6 @@ class AresMT5MultiManager:
                     except Exception:
                         pass
 
-            # پوشه‌های MQL5
             base_mql5 = os.path.join(BASE_MT5_DIR, "MQL5")
             if os.path.exists(base_mql5):
                 for sub in ["Include", "Indicators", "Libraries", "Scripts", "Images"]:
@@ -112,7 +139,7 @@ class AresMT5MultiManager:
                         except Exception:
                             pass
 
-        # ۲. کپی فایل اکسپرت AresBridgeEA
+        # ۲. قرار دادن اکسپرت رابط AresBridgeEA در پوشه کاربر
         ea_sources = [
             os.path.join(BASE_MT5_DIR, "MQL5", "Experts", "AresBridgeEA.ex5"),
             "/root/ARES_SYSTEM/AresBridgeEA.ex5",
@@ -126,7 +153,7 @@ class AresMT5MultiManager:
                 except Exception:
                     pass
 
-        # ۳. کپی فایل‌های کانفیگ طلایی آماده سرورها و مجوزهای وب‌ریکوئست
+        # ۳. انتقال کانفیگ سرورها
         if os.path.exists(GLOBAL_CONFIG_SRC):
             subprocess.run(f"cp -rf '{GLOBAL_CONFIG_SRC}'/* '{config_dir}/' 2>/dev/null", shell=True, check=False)
         base_config = os.path.join(BASE_MT5_DIR, "config")
@@ -134,14 +161,14 @@ class AresMT5MultiManager:
             subprocess.run(f"cp -n '{base_config}'/* '{config_dir}/' 2>/dev/null", shell=True, check=False)
 
         # ۴. انتخاب هوشمند نماد استارت متناسب با بروکر
-        start_symbol = "EURUSD." if "aron" in server.lower() else "EURUSD"
+        start_symbol = "EURUSD." if "aron" in server_lower else "EURUSD"
 
         # ۵. ساخت فایل کانفیگ استارت متاتریدر
         ini_path = os.path.join(user_dir, "mt5_start.ini")
         ini_content = f"""[Common]
 Login={login}
 Password={password}
-Server={server}
+Server={server_endpoint}
 
 [Experts]
 AllowLiveTrading=1
@@ -163,7 +190,7 @@ Period=M15
         return user_dir
 
     def launch_instance(self, user: Dict[str, Any]) -> bool:
-        """اجرای خودکار متاتریدر ایزوله با الگوی پایدار و حذف پاپ‌آپ‌های اولیه"""
+        """اجرای متاتریدر اختصاصی با ثبت پلاک پروسه (PID) و بستن پاپ‌آپ‌ها"""
         login = str(user.get("mt5_login", "")).strip()
         server = str(user.get("mt5_server", "MetaQuotes-Demo")).strip()
 
@@ -171,16 +198,19 @@ Period=M15
         if not user_dir:
             return False
 
-        # دستور اجرای متاتریدر در پس‌زمینه با مانیتور مجازی :99
+        pid_file = os.path.join(user_dir, "mt5.pid")
+
+        # دستور اجرای پس‌زمینه با ذخیره شماره پروسه در فایل mt5.pid
         launch_cmd = (
             f"cd '{user_dir}' && "
-            f"DISPLAY=:99 nohup wine terminal64.exe /portable /config:mt5_start.ini > /dev/null 2>&1 &"
+            f"DISPLAY=:99 nohup wine terminal64.exe /portable /config:mt5_start.ini > /dev/null 2>&1 & "
+            f"echo $! > '{pid_file}'"
         )
 
-        print(f"🚀 [ARES CLOUD MANAGER]: در حال اتصال خودکار متاتریدر اکانت {login} ({server})...", flush=True)
+        print(f"🚀 [ARES CLOUD MANAGER]: در حال اجرای متاتریدر اکانت {login} ({server})...", flush=True)
         try:
             subprocess.run(launch_cmd, shell=True, check=False)
-            # بستن خودکار پاپ‌آپ اولیه متاتریدر پس از ۴ ثانیه
+            # بستن خودکار پاپ‌آپ‌های اولیه پنجره
             dismiss_cmd = "(sleep 4 && DISPLAY=:99 xdotool key Escape Return 2>/dev/null) &"
             subprocess.run(dismiss_cmd, shell=True, check=False)
             return True
@@ -189,7 +219,7 @@ Period=M15
             return False
 
     def sync_all_user_instances(self):
-        """رصد منظم دیتابیس و روشن کردن متاتریدر اکانت‌های جدید"""
+        """رصد دائم و روشن کردن متاتریدر هر کاربری که در سایت اطلاعات وارد کرده"""
         accounts = self.get_configured_accounts()
         for user in accounts:
             login = str(user.get("mt5_login", "")).strip()
@@ -198,10 +228,8 @@ Period=M15
                 time.sleep(3)
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
-        """حلقه نظارتی دائمی ۲۴ ساعته"""
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES Multi-Tenant Cloud Manager V14.4) فعال شد.", flush=True)
-        print("   هر کاربری در سایت ثبت‌نام کند، متاتریدر او خودکار روی سرور لود خواهد شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.5 - اتصال جهانی و بدون وقفه) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         while True:
