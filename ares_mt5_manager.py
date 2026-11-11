@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 14.3 (TRUE ISOLATED PORTABLE RUNTIMES PER USER)
+VERSION: 14.4 (PERFECT MULTI-TENANT CLOUD ISOLATION & ZERO-POPUP RUNTIME)
 ================================================================================
 """
 
@@ -44,16 +44,15 @@ class AresMT5MultiManager:
         if not clean_login:
             return False
         try:
-            # اجرای مستقیم pgrep بدون shell=True تا پروسه جستجو خودش را پیدا نکند
             res1 = subprocess.run(["pgrep", "-f", f"mt5_{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res1.returncode == 0:
                 return True
             res2 = subprocess.run(["pgrep", "-f", f"mt5_instances/{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res2.returncode == 0:
                 return True
-            # سازگاری با اکانت قدیمی 300260 که تحت دسکتاپ MT5 در حال اجراست
+            # بررسی پروسه اختصاصی اکانت 300260 در مسیر اصلی
             if clean_login == "300260":
-                res3 = subprocess.run(["pgrep", "-f", "desktop=MT5"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                res3 = subprocess.run(["pgrep", "-f", "MetaTrader 5/terminal64.exe"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if res3.returncode == 0:
                     return True
             return False
@@ -76,7 +75,7 @@ class AresMT5MultiManager:
         os.makedirs(config_dir, exist_ok=True)
         os.makedirs(experts_dir, exist_ok=True)
 
-        # ۱. لینک/کپی فایل‌های اجرایی اصلی متاتریدر به پوشه اختصاصی کاربر
+        # ۱. لینک یا کپی فایل‌های باینری متاتریدر
         if os.path.exists(BASE_MT5_DIR):
             for fname in os.listdir(BASE_MT5_DIR):
                 src = os.path.join(BASE_MT5_DIR, fname)
@@ -84,14 +83,14 @@ class AresMT5MultiManager:
                 if os.path.isfile(src) and (fname.lower().endswith(".exe") or fname.lower().endswith(".dll")):
                     if not os.path.exists(dst):
                         try:
-                            os.link(src, dst)  # هاردلینک مستقیم (بدون مصرف حجم هارد)
+                            os.link(src, dst)
                         except Exception:
                             try:
                                 shutil.copy2(src, dst)
                             except Exception:
                                 pass
 
-            # پوشه‌های تکمیلی مورد نیاز متاتریدر
+            # پوشه‌های کمکی مورد نیاز
             for folder in ["profiles", "templates", "help", "sounds"]:
                 src_f = os.path.join(BASE_MT5_DIR, folder)
                 dst_f = os.path.join(user_dir, folder)
@@ -101,7 +100,7 @@ class AresMT5MultiManager:
                     except Exception:
                         pass
 
-            # پوشه‌های MQL5 به جز Experts
+            # پوشه‌های MQL5
             base_mql5 = os.path.join(BASE_MT5_DIR, "MQL5")
             if os.path.exists(base_mql5):
                 for sub in ["Include", "Indicators", "Libraries", "Scripts", "Images"]:
@@ -113,23 +112,31 @@ class AresMT5MultiManager:
                         except Exception:
                             pass
 
-        # ۲. کپی فایل اکسپرت کامپایل‌شده ARES Bridge
-        base_ea = os.path.join(BASE_MT5_DIR, "MQL5", "Experts", "AresBridgeEA.ex5")
+        # ۲. کپی فایل اکسپرت AresBridgeEA
+        ea_sources = [
+            os.path.join(BASE_MT5_DIR, "MQL5", "Experts", "AresBridgeEA.ex5"),
+            "/root/ARES_SYSTEM/AresBridgeEA.ex5",
+        ]
         target_ea = os.path.join(experts_dir, "AresBridgeEA.ex5")
-        if os.path.exists(base_ea):
-            try:
-                shutil.copy2(base_ea, target_ea)
-            except Exception:
-                pass
+        for src_ea in ea_sources:
+            if os.path.exists(src_ea):
+                try:
+                    shutil.copy2(src_ea, target_ea)
+                    break
+                except Exception:
+                    pass
 
-        # ۳. کپی فایل‌های سرور بروکرها (servers.dat)
+        # ۳. کپی فایل‌های کانفیگ طلایی آماده سرورها و مجوزهای وب‌ریکوئست
         if os.path.exists(GLOBAL_CONFIG_SRC):
             subprocess.run(f"cp -rf '{GLOBAL_CONFIG_SRC}'/* '{config_dir}/' 2>/dev/null", shell=True, check=False)
         base_config = os.path.join(BASE_MT5_DIR, "config")
         if os.path.exists(base_config):
-            subprocess.run(f"cp -rf '{base_config}'/* '{config_dir}/' 2>/dev/null", shell=True, check=False)
+            subprocess.run(f"cp -n '{base_config}'/* '{config_dir}/' 2>/dev/null", shell=True, check=False)
 
-        # ۴. ساخت خودکار فایل تنظیمات اختصاصی لاگین متاتریدر
+        # ۴. انتخاب هوشمند نماد استارت متناسب با بروکر
+        start_symbol = "EURUSD." if "aron" in server.lower() else "EURUSD"
+
+        # ۵. ساخت فایل کانفیگ استارت متاتریدر
         ini_path = os.path.join(user_dir, "mt5_start.ini")
         ini_content = f"""[Common]
 Login={login}
@@ -147,7 +154,7 @@ WebRequestUrl=http://141.98.166.81,http://127.0.0.1,http://localhost
 
 [Start]
 Expert=AresBridgeEA
-Symbol=EURUSD
+Symbol={start_symbol}
 Period=M15
 """
         with open(ini_path, "w", encoding="utf-8") as f:
@@ -156,7 +163,7 @@ Period=M15
         return user_dir
 
     def launch_instance(self, user: Dict[str, Any]) -> bool:
-        """اجرای خودکار متاتریدر ایزوله از داخل پوشه اختصاصی کاربر"""
+        """اجرای خودکار متاتریدر ایزوله با الگوی پایدار و حذف پاپ‌آپ‌های اولیه"""
         login = str(user.get("mt5_login", "")).strip()
         server = str(user.get("mt5_server", "MetaQuotes-Demo")).strip()
 
@@ -164,23 +171,17 @@ Period=M15
         if not user_dir:
             return False
 
-        user_terminal = os.path.join(user_dir, "terminal64.exe")
-        if not os.path.exists(user_terminal):
-            user_terminal = os.path.join(BASE_MT5_DIR, "terminal64.exe")
-
-        ini_path = os.path.join(user_dir, "mt5_start.ini")
-
-        # اجرای متاتریدر مستقیم از داخل پوشه خودِ کاربر در حالت پرتابل واقعی
+        # دستور اجرای متاتریدر در پس‌زمینه با مانیتور مجازی :99
         launch_cmd = (
             f"cd '{user_dir}' && "
-            f"DISPLAY=:99 wine explorer /desktop=mt5_{login},1024x768 "
-            f"'{user_terminal}' /portable /config:'{ini_path}' > /dev/null 2>&1 &"
+            f"DISPLAY=:99 nohup wine terminal64.exe /portable /config:mt5_start.ini > /dev/null 2>&1 &"
         )
 
         print(f"🚀 [ARES CLOUD MANAGER]: در حال اتصال خودکار متاتریدر اکانت {login} ({server})...", flush=True)
         try:
             subprocess.run(launch_cmd, shell=True, check=False)
-            dismiss_cmd = "(sleep 8 && DISPLAY=:99 xdotool key Escape Return 2>/dev/null) &"
+            # بستن خودکار پاپ‌آپ اولیه متاتریدر پس از ۴ ثانیه
+            dismiss_cmd = "(sleep 4 && DISPLAY=:99 xdotool key Escape Return 2>/dev/null) &"
             subprocess.run(dismiss_cmd, shell=True, check=False)
             return True
         except Exception as e:
@@ -199,7 +200,7 @@ Period=M15
     def run_supervisor(self, poll_interval_seconds: int = 10):
         """حلقه نظارتی دائمی ۲۴ ساعته"""
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES Multi-Tenant Cloud Manager V14.3) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES Multi-Tenant Cloud Manager V14.4) فعال شد.", flush=True)
         print("   هر کاربری در سایت ثبت‌نام کند، متاتریدر او خودکار روی سرور لود خواهد شد.", flush=True)
         print("=" * 80, flush=True)
 
