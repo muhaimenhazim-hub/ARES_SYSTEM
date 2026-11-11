@@ -39,14 +39,24 @@ class AresMT5MultiManager:
             return []
 
     def is_login_running(self, login: str) -> bool:
-        """بررسی دقیق فعال بودن متاتریدر اختصاصی این کاربر در سرور"""
+        """بررسی دقیق فعال بودن متاتریدر اختصاصی این کاربر در سرور بدون باگ جستجوی شل"""
         clean_login = str(login).strip()
         if not clean_login:
             return False
         try:
-            cmd = f"pgrep -f 'mt5_{clean_login}' || pgrep -f 'mt5_instances/{clean_login}'"
-            res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return res.returncode == 0
+            # اجرای مستقیم pgrep بدون shell=True تا پروسه جستجو خودش را پیدا نکند
+            res1 = subprocess.run(["pgrep", "-f", f"mt5_{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res1.returncode == 0:
+                return True
+            res2 = subprocess.run(["pgrep", "-f", f"mt5_instances/{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res2.returncode == 0:
+                return True
+            # سازگاری با اکانت قدیمی 300260 که تحت دسکتاپ MT5 در حال اجراست
+            if clean_login == "300260":
+                res3 = subprocess.run(["pgrep", "-f", "desktop=MT5"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if res3.returncode == 0:
+                    return True
+            return False
         except Exception:
             return False
 
