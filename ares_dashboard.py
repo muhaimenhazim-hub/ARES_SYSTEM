@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 14.1 (REAL BROKER PNL, LIVE MT5 TICKETS & ZERO GHOST TRADES)
+VERSION: 14.6 (PROFESSIONAL FINTECH UI, MOBILE-RESPONSIVE & ZERO MOCK DATA)
 ================================================================================
 """
 
@@ -41,206 +41,369 @@ def get_local_ip():
         return "127.0.0.1"
 
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ARES AI TRADING SYSTEM — سامانه معاملات هوشمند</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ARES AI TRADING SYSTEM — سامانه معاملات هوشمند ابری</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Vazirmatn', 'system-ui', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#ecfdf5',
+                            500: '#10b981',
+                            600: '#059669',
+                            700: '#047857',
+                            950: '#022c22',
+                        },
+                        dark: {
+                            base: '#070a0f',
+                            card: '#0f141c',
+                            cardSoft: '#141b26',
+                            border: '#1e293b',
+                            borderHighlight: '#334155',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
     <style>
-        body { font-family: system-ui, -apple-system, sans-serif; background-color: #0b0e14; color: #e2e8f0; }
-        .card { background-color: #151b26; border: 1px solid #232d3f; border-radius: 0.75rem; }
-        .glow-green { box-shadow: 0 0 15px rgba(16, 185, 129, 0.2); }
-        .modal { background-color: rgba(0, 0, 0, 0.85); backdrop-filter: blur(6px); }
+        * { -webkit-tap-highlight-color: transparent; }
+        body { font-family: 'Vazirmatn', sans-serif; background-color: #070a0f; color: #e2e8f0; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .glass-card {
+            background: linear-gradient(135deg, rgba(17, 24, 39, 0.7) 0%, rgba(15, 23, 42, 0.85) 100%);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+        }
+        .glow-emerald {
+            box-shadow: 0 0 25px -5px rgba(16, 185, 129, 0.15);
+        }
+        .glow-button {
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.25);
+        }
+        .glow-button:hover {
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
+        }
+        .custom-scrollbar::-webkit-scrollbar { height: 6px; width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #0b0f17; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #263345; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #3b4e6b; }
     </style>
 </head>
-<body class="p-4 md:p-6 min-h-screen flex flex-col justify-between">
+<body class="min-h-screen flex flex-col justify-between selection:bg-emerald-500/20 selection:text-emerald-400">
 
-    <div id="auth-container" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0b0e14] hidden">
-        <div class="card max-w-md w-full p-6 md:p-8 text-right border-gray-800 shadow-2xl">
+    <!-- ==================== AUTH CONTAINER (صفحه ورود و ثبت‌نام جهانی) ==================== -->
+    <div id="auth-container" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#070a0f] overflow-y-auto">
+        <!-- نور پس‌زمینه آمبیانت -->
+        <div class="absolute inset-0 overflow-hidden pointer-events-none">
+            <div class="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl"></div>
+            <div class="absolute bottom-1/4 left-1/3 w-80 h-80 bg-blue-500/10 rounded-full blur-3xl"></div>
+        </div>
+
+        <div class="relative w-full max-w-md my-8 glass-card rounded-2xl p-6 sm:p-8 shadow-2xl border border-slate-800">
+            <!-- سربرگ برند و لوگو -->
             <div class="text-center mb-6">
-                <div class="inline-block p-3 rounded-full bg-emerald-950/60 border border-emerald-800 mb-3">
-                    <i class="fa-solid fa-robot text-3xl text-emerald-400"></i>
+                <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-emerald-600 to-emerald-400 text-white mb-3 shadow-lg shadow-emerald-500/20">
+                    <i class="fa-solid fa-chart-line text-2xl"></i>
                 </div>
-                <h2 class="text-xl md:text-2xl font-bold text-white tracking-wider">ARES AI TRADING</h2>
-                <p class="text-xs text-gray-400 mt-1">سامانه اختصاصی مدیریت معاملات هوشمند ۲۴ ساعته</p>
+                <h1 class="text-2xl font-black text-white tracking-wider flex items-center justify-center gap-2">
+                    <span>ARES AI</span>
+                    <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">V14.6</span>
+                </h1>
+                <p class="text-xs text-slate-400 mt-1 font-normal">سامانه مدیریت معاملات هوشمند و الگوریتمی تحت کلود</p>
             </div>
 
-            <div class="flex border-b border-gray-800 mb-6">
-                <button id="tab-login-btn" onclick="switchAuthTab('login')" class="flex-1 pb-3 text-sm font-bold text-emerald-400 border-b-2 border-emerald-400 transition">ورود به حساب</button>
-                <button id="tab-register-btn" onclick="switchAuthTab('register')" class="flex-1 pb-3 text-sm font-bold text-gray-500 transition">ثبت‌نام کاربر جدید</button>
-            </div>
-
-            <div class="space-y-4 text-xs md:text-sm">
-                <div>
-                    <label class="block text-gray-400 mb-1">ایمیل یا شماره موبایل:</label>
-                    <input type="text" id="auth-identifier" placeholder="ایمیل یا شماره خود را وارد کنید" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
-                </div>
-                <div>
-                    <label class="block text-gray-400 mb-1">کلمه عبور:</label>
-                    <input type="password" id="auth-password" placeholder="کلمه عبور (حداقل ۴ کاراکتر)" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:outline-none focus:border-emerald-500">
-                </div>
-                <button id="auth-submit-btn" onclick="handleAuthSubmit()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition shadow-lg shadow-emerald-950/40">
-                    ورود به پنل کاربری
+            <!-- تب‌های ورود / ثبت‌نام -->
+            <div class="flex p-1 bg-slate-900/90 rounded-xl border border-slate-800 mb-6">
+                <button id="tab-login-btn" onclick="switchAuthTab('login')" class="flex-1 py-2.5 text-xs sm:text-sm font-bold text-white bg-slate-800 rounded-lg shadow transition">
+                    ورود به حساب
                 </button>
-                <div id="auth-error-msg" class="text-red-400 text-xs text-center hidden"></div>
+                <button id="tab-register-btn" onclick="switchAuthTab('register')" class="flex-1 py-2.5 text-xs sm:text-sm font-bold text-slate-400 hover:text-white rounded-lg transition">
+                    ثبت‌نام کاربر جدید
+                </button>
+            </div>
+
+            <!-- فرم اطلاعات -->
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1.5">شناسه کاربری (ایمیل یا شماره همراه):</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 right-0 flex items-center pr-3.5 pointer-events-none text-slate-500 text-sm">
+                            <i class="fa-solid fa-user"></i>
+                        </span>
+                        <input type="text" id="auth-identifier" placeholder="مثال: 0777708735 یا user@gmail.com" 
+                            class="w-full bg-slate-950/80 border border-slate-700/80 rounded-xl py-3 pr-10 pl-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition font-mono">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1.5">کلمه عبور امنیتی:</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 right-0 flex items-center pr-3.5 pointer-events-none text-slate-500 text-sm">
+                            <i class="fa-solid fa-lock"></i>
+                        </span>
+                        <input type="password" id="auth-password" placeholder="حداقل ۴ کاراکتر" 
+                            class="w-full bg-slate-950/80 border border-slate-700/80 rounded-xl py-3 pr-10 pl-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition font-mono">
+                    </div>
+                </div>
+
+                <!-- باکس پیام خطا -->
+                <div id="auth-error-msg" class="p-3 rounded-xl bg-rose-950/40 border border-rose-800/60 text-rose-300 text-xs text-center hidden"></div>
+
+                <!-- دکمه ارسال -->
+                <button id="auth-submit-btn" onclick="handleAuthSubmit()" 
+                    class="w-full py-3.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white font-bold rounded-xl transition duration-200 glow-button text-sm flex items-center justify-center gap-2 mt-2">
+                    <i class="fa-solid fa-arrow-right-to-bracket"></i>
+                    <span id="auth-submit-txt">ورود به پنل کاربری</span>
+                </button>
+            </div>
+
+            <!-- پاورقی امنیت -->
+            <div class="mt-6 pt-5 border-t border-slate-800/80 text-center text-[11px] text-slate-500 flex items-center justify-center gap-1.5">
+                <i class="fa-solid fa-shield-halved text-emerald-400/80"></i>
+                <span>ایمن‌سازی شده با رمزنگاری SHA-256 و اتصال ایزوله اختصاصی</span>
             </div>
         </div>
     </div>
 
-    <div id="main-dashboard" class="hidden">
-        <header class="flex flex-wrap justify-between items-center mb-6 pb-4 border-b border-gray-800 gap-4">
-            <div>
-                <div class="flex items-center gap-3">
-                    <div class="h-4 w-4 rounded-full bg-emerald-500 animate-pulse"></div>
-                    <h1 class="text-xl md:text-2xl font-bold tracking-wider text-emerald-400">ARES AI TRADING SYSTEM</h1>
-                    <span id="user-display-badge" class="text-xs bg-gray-800 text-gray-300 border border-gray-700 px-3 py-1 rounded-full font-mono">کاربر: ...</span>
+    <!-- ==================== MAIN DASHBOARD ==================== -->
+    <div id="main-dashboard" class="hidden flex-1 flex flex-col p-3 sm:p-5 lg:p-6 max-w-7xl mx-auto w-full">
+        
+        <!-- نوبار بالای صفحه -->
+        <header class="glass-card rounded-2xl p-4 mb-5 border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <!-- اطلاعات سمت راست: عنوان و کاربر -->
+            <div class="flex items-center gap-3">
+                <div class="relative flex items-center justify-center w-11 h-11 rounded-xl bg-gradient-to-tr from-emerald-600 to-emerald-400 text-white shadow-md shadow-emerald-950">
+                    <i class="fa-solid fa-robot text-lg"></i>
+                    <span id="header-status-dot" class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full animate-ping"></span>
+                    <span class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full"></span>
                 </div>
-                <p class="text-gray-400 text-xs md:text-sm mt-1" id="broker-connected-info">در حال دریافت داده‌های زنده بروکر...</p>
+                <div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <h1 class="text-base sm:text-lg font-bold text-white tracking-wide">ARES AI TRADING SYSTEM</h1>
+                        <span id="user-display-badge" class="text-xs bg-slate-800 text-emerald-400 border border-slate-700 px-2.5 py-0.5 rounded-full font-mono">کاربر: ...</span>
+                    </div>
+                    <p id="broker-connected-info" class="text-xs text-slate-400 mt-0.5 font-normal flex items-center gap-1.5">
+                        <i class="fa-solid fa-server text-[10px] text-slate-500"></i>
+                        <span>در حال بررسی اتصال به بروکر...</span>
+                    </p>
+                </div>
             </div>
-            
-            <div class="flex flex-wrap gap-2 items-center">
-                <button id="btn-toggle-trading" onclick="toggleAutoTrading()" class="px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1.5 shadow-md">
-                    <i class="fa-solid fa-play"></i> <span id="lbl-toggle-trading">شروع معامله خودکار</span>
-                </button>
-                
-                <button onclick="disconnectBroker()" class="bg-red-950/40 border border-red-800 hover:bg-red-900 text-red-300 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1">
-                    <i class="fa-solid fa-unlink"></i> قطع ارتباط حساب
+
+            <!-- کلیدهای کنترل سمت چپ -->
+            <div class="flex items-center gap-2 flex-wrap">
+                <!-- دکمه استارت/توقف ترید -->
+                <button id="btn-toggle-trading" onclick="toggleAutoTrading()" class="flex-1 sm:flex-none px-3.5 py-2.5 rounded-xl font-bold text-xs transition duration-200 flex items-center justify-center gap-2 shadow-sm bg-slate-800 border border-slate-700 text-slate-300">
+                    <i class="fa-solid fa-play text-xs"></i>
+                    <span id="lbl-toggle-trading">اجازه معامله به ربات</span>
                 </button>
 
-                <button onclick="openSettingsModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1 shadow-md shadow-blue-900/30">
-                    <i class="fa-solid fa-gear"></i> تنظیمات و اتصال متاتریدر
+                <!-- تنظیمات حساب -->
+                <button onclick="openSettingsModal()" class="px-3.5 py-2.5 rounded-xl font-bold text-xs bg-blue-600 hover:bg-blue-500 text-white transition duration-200 flex items-center gap-1.5 shadow-md shadow-blue-950/40">
+                    <i class="fa-solid fa-sliders text-xs"></i>
+                    <span class="hidden sm:inline">تنظیمات و</span> اتصال متاتریدر
                 </button>
 
-                <button onclick="logoutUser()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1">
-                    <i class="fa-solid fa-right-from-bracket"></i> خروج
+                <!-- قطع ارتباط حساب -->
+                <button onclick="disconnectBroker()" class="px-3 py-2.5 rounded-xl font-bold text-xs bg-rose-950/40 border border-rose-800/80 hover:bg-rose-900/60 text-rose-300 transition duration-200 flex items-center gap-1.5">
+                    <i class="fa-solid fa-link-slash text-xs"></i>
+                    <span class="hidden sm:inline">قطع ارتباط</span>
+                </button>
+
+                <!-- خروج -->
+                <button onclick="logoutUser()" title="خروج از حساب" class="px-3 py-2.5 rounded-xl font-bold text-xs bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-slate-300 transition duration-200">
+                    <i class="fa-solid fa-right-from-bracket"></i>
                 </button>
             </div>
         </header>
 
-        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 md:gap-6 mb-8">
-            <div class="card p-5 glow-green">
-                <div class="text-gray-400 text-sm font-medium flex justify-between">
+        <!-- کارت‌های چهارگانه شاخص‌های مالی -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            
+            <!-- کارت ۱: موجودی واقعی حساب (Equity) -->
+            <div class="glass-card rounded-2xl p-5 border border-slate-800 relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="flex items-center justify-between text-slate-400 text-xs font-semibold">
                     <span>موجودی واقعی حساب (Equity)</span>
-                    <i class="fa-solid fa-wallet text-emerald-400"></i>
+                    <span class="w-8 h-8 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center text-sm">
+                        <i class="fa-solid fa-wallet"></i>
+                    </span>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" id="equity-val">$0.00</div>
-                <div class="text-xs text-gray-400 mt-2 font-medium" id="account-id-display">در انتظار اتصال بروکر</div>
+                <div class="text-2xl sm:text-3xl font-extrabold font-mono text-white mt-3" id="equity-val">$0.00</div>
+                <div class="text-[11px] text-slate-400 mt-2 flex items-center gap-1 truncate" id="account-id-display">
+                    <i class="fa-solid fa-circle-notch text-[9px]"></i>
+                    <span>در انتظار اتصال به بروکر</span>
+                </div>
             </div>
 
-            <div class="card p-5">
-                <div class="text-gray-400 text-sm font-medium flex justify-between">
+            <!-- کارت ۲: سود و زیان خالص کل (Net PnL) -->
+            <div class="glass-card rounded-2xl p-5 border border-slate-800 relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="flex items-center justify-between text-slate-400 text-xs font-semibold">
                     <span>سود و زیان خالص کل</span>
-                    <i class="fa-solid fa-chart-line text-blue-400"></i>
+                    <span class="w-8 h-8 rounded-xl bg-blue-500/10 text-blue-400 flex items-center justify-center text-sm">
+                        <i class="fa-solid fa-chart-line"></i>
+                    </span>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-emerald-400 mt-2" id="daily-pnl">$0.00</div>
-                <div class="text-xs text-gray-400 mt-2">بر اساس تاریخچه واقعی بروکر</div>
+                <!-- خط رنگ سود/زیان: سبز برای سود، قرمز برای ضرر -->
+                <div class="text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-slate-400" id="daily-pnl">$0.00</div>
+                <div class="text-[11px] text-slate-400 mt-2">بر اساس تاریخچه واقعی بروکر</div>
             </div>
 
-            <div class="card p-5">
-                <div class="text-gray-400 text-sm font-medium flex justify-between">
+            <!-- کارت ۳: پوزیشن‌های فعال بروکر -->
+            <div class="glass-card rounded-2xl p-5 border border-slate-800 relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="flex items-center justify-between text-slate-400 text-xs font-semibold">
                     <span>پوزیشن‌های فعال بروکر</span>
-                    <i class="fa-solid fa-layer-group text-purple-400"></i>
+                    <span class="w-8 h-8 rounded-xl bg-purple-500/10 text-purple-400 flex items-center justify-center text-sm">
+                        <i class="fa-solid fa-layer-group"></i>
+                    </span>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-white mt-2" style="direction: ltr; text-align: right;" id="open-positions-count">0 / 3</div>
-                <div class="text-xs text-gray-400 mt-2">سقف مجاز: حداکثر ۳ معامله واقعی</div>
+                <div class="text-2xl sm:text-3xl font-extrabold font-mono text-white mt-3" style="direction: ltr; text-align: right;" id="open-positions-count">0 / 3</div>
+                <div class="text-[11px] text-slate-400 mt-2">سقف کنترل ریسک: حداکثر ۳ معامله</div>
             </div>
 
-            <div class="card p-5">
-                <div class="text-gray-400 text-sm font-medium flex justify-between">
+            <!-- کارت ۴: افت سرمایه (Drawdown) -->
+            <div class="glass-card rounded-2xl p-5 border border-slate-800 relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="flex items-center justify-between text-slate-400 text-xs font-semibold">
                     <span>افت سرمایه (Drawdown)</span>
-                    <i class="fa-solid fa-shield-halved text-amber-400"></i>
+                    <span class="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center text-sm">
+                        <i class="fa-solid fa-shield-halved"></i>
+                    </span>
                 </div>
-                <div class="text-2xl md:text-3xl font-extrabold text-emerald-400 mt-2" id="drawdown-val">0.00%</div>
-                <div class="text-xs text-gray-400 mt-2">سقف کنترل ریسک: 12%</div>
+                <!-- رنگ ضرر متناسب با ریسک: سبز برای ۰، کهربایی برای زیر ۵٪، قرمز آتشین برای بالای ۵٪ -->
+                <div class="text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-emerald-400" id="drawdown-val">0.00%</div>
+                <div class="text-[11px] text-slate-400 mt-2">سقف مجاز افت حساب: 12%</div>
             </div>
+
         </div>
 
-        <div class="card p-4 md:p-6 mb-8">
-            <h2 class="text-base font-bold text-gray-200 mb-4 flex items-center gap-2">
-                <i class="fa-solid fa-bolt text-amber-400"></i> پوزیشن‌های باز واقعی در متاتریدر ۵
-            </h2>
-            <div class="overflow-x-auto">
-                <table class="w-full text-right text-xs md:text-sm">
-                    <thead class="text-gray-400 bg-gray-900/50 uppercase border-b border-gray-800">
+        <!-- جدول پوزیشن‌های باز واقعی (شامل حد سود TP و حد ضرر SL) -->
+        <div class="glass-card rounded-2xl p-4 sm:p-5 border border-slate-800 mb-6">
+            <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
+                <h2 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                    <span class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                    <span>پوزیشن‌های باز واقعی در متاتریدر ۵</span>
+                </h2>
+                <span class="text-xs text-slate-500 font-mono" id="table-live-refresh-timer">برخط (Real-Time)</span>
+            </div>
+
+            <div class="overflow-x-auto custom-scrollbar">
+                <table class="w-full text-right text-xs">
+                    <thead class="text-slate-400 bg-slate-900/60 uppercase border-b border-slate-800 text-[11px] whitespace-nowrap">
                         <tr>
                             <th class="py-3 px-3">تیکت بروکر</th>
                             <th class="py-3 px-3">نماد</th>
                             <th class="py-3 px-3">جهت</th>
                             <th class="py-3 px-3">قیمت ورود</th>
-                            <th class="py-3 px-3">حد ضرر (SL)</th>
+                            <th class="py-3 px-3 text-rose-400">حد ضرر (SL)</th>
+                            <th class="py-3 px-3 text-emerald-400">حد سود (TP)</th>
                             <th class="py-3 px-3">حجم</th>
                             <th class="py-3 px-3">سود/زیان لحظه‌ای</th>
-                            <th class="py-3 px-3">وضعیت</th>
+                            <th class="py-3 px-3 text-center">وضعیت</th>
                         </tr>
                     </thead>
-                    <tbody id="open-trades-table" class="divide-y divide-gray-800">
+                    <tbody id="open-trades-table" class="divide-y divide-slate-800/60 whitespace-nowrap">
                         <tr>
-                            <td colspan="8" class="py-6 text-center text-gray-500">هیچ معامله بازی در بروکر وجود ندارد.</td>
+                            <td colspan="9" class="py-8 text-center text-slate-500 font-normal">
+                                <i class="fa-solid fa-inbox text-2xl mb-2 block text-slate-600"></i>
+                                هیچ معامله بازی در بروکر وجود ندارد.
+                            </td>
                         </tr>
                     </tbody>
                 </table>
             </div>
         </div>
+
     </div>
 
-    <div id="settings-modal" class="fixed inset-0 modal flex items-center justify-center p-4 hidden z-50">
-        <div class="bg-gray-900 border border-gray-700 rounded-xl max-w-xl w-full p-6 text-right max-h-[90vh] overflow-y-auto shadow-2xl">
-            <div class="flex justify-between items-center pb-3 border-b border-gray-800">
-                <h3 class="text-base font-bold text-white flex items-center gap-2">
-                    <i class="fa-solid fa-sliders text-blue-400"></i> تنظیمات حساب متاتریدر ۵
+    <!-- ==================== SETTINGS MODAL (تنظیمات اتصال متاتریدر) ==================== -->
+    <div id="settings-modal" class="fixed inset-0 modal flex items-center justify-center p-4 hidden z-50 bg-black/80 backdrop-blur-sm">
+        <div class="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-lg w-full p-5 sm:p-6 text-right max-h-[92vh] overflow-y-auto shadow-2xl custom-scrollbar">
+            
+            <div class="flex justify-between items-center pb-3 border-b border-slate-800">
+                <h3 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-sliders text-emerald-400"></i>
+                    <span>تنظیمات حساب معاملاتی متاتریدر ۵</span>
                 </h3>
-                <button onclick="closeSettingsModal()" class="text-gray-400 hover:text-white text-xl">&times;</button>
+                <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-white text-2xl leading-none">&times;</button>
             </div>
 
-            <div class="mt-4 p-4 rounded-lg bg-emerald-950/30 border border-emerald-800/60 space-y-3 text-xs">
-                <h4 class="font-bold text-emerald-400 flex items-center gap-1.5">
-                    <i class="fa-solid fa-circle-check"></i> اطلاعات حساب متاتریدر ۵ (MT5)
+            <!-- بخش اطلاعات MT5 -->
+            <div class="mt-4 p-4 rounded-xl bg-slate-950/70 border border-emerald-900/40 space-y-3 text-xs">
+                <h4 class="font-bold text-emerald-400 flex items-center gap-1.5 text-xs">
+                    <i class="fa-solid fa-plug text-xs"></i>
+                    <span>اطلاعات حساب متاتریدر ۵ (MetaTrader 5)</span>
+                </h4>
+                
+                <div>
+                    <label class="block text-slate-300 mb-1">شماره حساب (Login):</label>
+                    <input type="text" id="cfg-mt5-login" placeholder="مثال: 300260 یا 115293699" 
+                        class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white font-mono focus:border-emerald-500 focus:outline-none">
+                </div>
+
+                <div>
+                    <label class="block text-slate-300 mb-1">رمز عبور حساب متاتریدر (Password):</label>
+                    <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور اصلی حساب بروکر" 
+                        class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white font-mono focus:border-emerald-500 focus:outline-none">
+                </div>
+
+                <div>
+                    <label class="block text-slate-300 mb-1">نام سرور بروکر (Server):</label>
+                    <input type="text" id="cfg-mt5-server" placeholder="مثال: AronMarkets-Demo یا MetaQuotes-Demo" 
+                        class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-white font-mono focus:border-emerald-500 focus:outline-none">
+                </div>
+            </div>
+
+            <!-- بخش اختیاری بایننس -->
+            <div class="mt-4 p-4 rounded-xl bg-slate-950/40 border border-slate-800 space-y-2.5 text-xs">
+                <h4 class="font-bold text-slate-300 flex items-center gap-1.5">
+                    <i class="fa-brands fa-bitcoin text-amber-400"></i>
+                    <span>صرافی بایننس (کریپتو فیوچرز — اختیاری)</span>
                 </h4>
                 <div>
-                    <label class="block text-gray-300 mb-1">شماره حساب متاتریدر ۵ (Login):</label>
-                    <input type="text" id="cfg-mt5-login" placeholder="مثال: 300260" class="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white font-mono">
+                    <label class="block text-slate-400 mb-1">Binance API Key:</label>
+                    <input type="text" id="cfg-binance-key" placeholder="API Key" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono focus:border-emerald-500 focus:outline-none">
                 </div>
                 <div>
-                    <label class="block text-gray-300 mb-1">رمز عبور متاتریدر ۵ (Password):</label>
-                    <input type="password" id="cfg-mt5-pass" placeholder="رمز عبور اصلی حساب متاتریدر" class="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white font-mono">
-                </div>
-                <div>
-                    <label class="block text-gray-300 mb-1">نام سرور بروکر (Server):</label>
-                    <input type="text" id="cfg-mt5-server" placeholder="مثال: AronMarkets-Demo" class="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white font-mono">
+                    <label class="block text-slate-400 mb-1">Binance Secret Key:</label>
+                    <input type="password" id="cfg-binance-secret" placeholder="Secret Key" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white font-mono focus:border-emerald-500 focus:outline-none">
                 </div>
             </div>
 
-            <div class="mt-4 p-4 rounded-lg bg-gray-800/40 border border-amber-900/40 space-y-2.5 text-xs">
-                <h4 class="font-bold text-amber-400 flex items-center gap-1.5"><i class="fa-brands fa-bitcoin"></i> صرافی بایننس (کریپتو فیوچرز - اختیاری)</h4>
-                <div>
-                    <label class="block text-gray-400 mb-1">Binance API Key:</label>
-                    <input type="text" id="cfg-binance-key" placeholder="API Key" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
-                </div>
-                <div>
-                    <label class="block text-gray-400 mb-1">Binance Secret Key:</label>
-                    <input type="password" id="cfg-binance-secret" placeholder="Secret Key" class="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white font-mono">
-                </div>
-            </div>
-
-            <div class="mt-6 flex justify-end gap-3">
-                <button onclick="closeSettingsModal()" class="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg text-xs">بستن</button>
-                <button onclick="saveAccountSettings()" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-950/50">
-                    ذخیره تنظیمات
+            <!-- دکمه‌ها -->
+            <div class="mt-6 flex justify-end gap-2.5">
+                <button onclick="closeSettingsModal()" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold transition">
+                    انصراف
+                </button>
+                <button onclick="saveAccountSettings()" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition glow-button flex items-center gap-1.5">
+                    <i class="fa-solid fa-check text-xs"></i>
+                    <span>ذخیره و اتصال به بروکر</span>
                 </button>
             </div>
+
         </div>
     </div>
 
+    <!-- ==================== JAVASCRIPT LOGIC ==================== -->
     <script>
         let currentUser = null;
         try { currentUser = JSON.parse(localStorage.getItem('ares_user') || 'null'); } catch(e) {}
 
         let currentAuthMode = 'login';
 
+        // مقداردهی اولیه صفحه بر اساس لاگین بودن کاربر
         if (currentUser && currentUser.user_id) {
             document.getElementById('main-dashboard').classList.remove('hidden');
             document.getElementById('auth-container').classList.add('hidden');
@@ -254,16 +417,16 @@ HTML_TEMPLATE = """
             currentAuthMode = mode;
             const loginBtn = document.getElementById('tab-login-btn');
             const regBtn = document.getElementById('tab-register-btn');
-            const submitBtn = document.getElementById('auth-submit-btn');
+            const submitTxt = document.getElementById('auth-submit-txt');
 
             if (mode === 'login') {
-                loginBtn.className = "flex-1 pb-3 text-sm font-bold text-emerald-400 border-b-2 border-emerald-400 transition";
-                regBtn.className = "flex-1 pb-3 text-sm font-bold text-gray-500 transition";
-                submitBtn.innerText = "ورود به پنل کاربری";
+                loginBtn.className = "flex-1 py-2.5 text-xs sm:text-sm font-bold text-white bg-slate-800 rounded-lg shadow transition";
+                regBtn.className = "flex-1 py-2.5 text-xs sm:text-sm font-bold text-slate-400 hover:text-white rounded-lg transition";
+                submitTxt.innerText = "ورود به پنل کاربری";
             } else {
-                regBtn.className = "flex-1 pb-3 text-sm font-bold text-emerald-400 border-b-2 border-emerald-400 transition";
-                loginBtn.className = "flex-1 pb-3 text-sm font-bold text-gray-500 transition";
-                submitBtn.innerText = "ثبت‌نام و ایجاد حساب";
+                regBtn.className = "flex-1 py-2.5 text-xs sm:text-sm font-bold text-white bg-slate-800 rounded-lg shadow transition";
+                loginBtn.className = "flex-1 py-2.5 text-xs sm:text-sm font-bold text-slate-400 hover:text-white rounded-lg transition";
+                submitTxt.innerText = "ثبت‌نام و ایجاد حساب جدید";
             }
         }
 
@@ -273,7 +436,7 @@ HTML_TEMPLATE = """
             const errBox = document.getElementById('auth-error-msg');
 
             if (!identifier || !password) {
-                errBox.innerText = "لطفاً اطلاعات را وارد کنید.";
+                errBox.innerText = "لطفاً شناسه کاربری و رمز عبور را وارد کنید.";
                 errBox.classList.remove('hidden');
                 return;
             }
@@ -293,11 +456,11 @@ HTML_TEMPLATE = """
                     document.getElementById('main-dashboard').classList.remove('hidden');
                     initDashboard();
                 } else {
-                    errBox.innerText = data.detail || "خطا در ورود";
+                    errBox.innerText = data.detail || "خطا در احراز هویت";
                     errBox.classList.remove('hidden');
                 }
             } catch (err) {
-                errBox.innerText = "خطا در ارتباط با سرور";
+                errBox.innerText = "خطا در برقراری ارتباط با سرور ابری";
                 errBox.classList.remove('hidden');
             }
         }
@@ -326,28 +489,62 @@ HTML_TEMPLATE = """
                     return;
                 }
                 const data = await res.json();
-                document.getElementById('equity-val').innerText = `$${Number(data.equity || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-                
-                const pnl = Number(data.daily_pnl || 0);
-                document.getElementById('daily-pnl').innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
-                document.getElementById('daily-pnl').className = `text-2xl md:text-3xl font-extrabold mt-2 ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`;
-                
-                const dd = Number(data.drawdown_pct || 0);
-                document.getElementById('drawdown-val').innerText = `${dd.toFixed(2)}%`;
 
+                // ۱. بروزرسانی موجودی واقعی (Equity)
+                const eq = Number(data.equity || 0);
+                document.getElementById('equity-val').innerText = `$${eq.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+                // ۲. بروزرسانی سود و زیان خالص کل با خط رنگ مناسب
+                const pnl = Number(data.daily_pnl || 0);
+                const pnlElem = document.getElementById('daily-pnl');
+                if (pnl > 0) {
+                    pnlElem.innerText = `+$${pnl.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                    pnlElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-emerald-400";
+                } else if (pnl < 0) {
+                    pnlElem.innerText = `-$${Math.abs(pnl).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                    pnlElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-rose-500";
+                } else {
+                    pnlElem.innerText = `$0.00`;
+                    pnlElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-slate-400";
+                }
+
+                // ۳. بروزرسانی درصد افت سرمایه (Drawdown) با رنگ متناسب با ریسک ضرر
+                const dd = Number(data.drawdown_pct || 0);
+                const ddElem = document.getElementById('drawdown-val');
+                ddElem.innerText = `${dd.toFixed(2)}%`;
+                if (dd === 0) {
+                    ddElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-emerald-400";
+                } else if (dd < 5.0) {
+                    ddElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-amber-400";
+                } else {
+                    ddElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-rose-500 animate-pulse";
+                }
+
+                // ۴. پوزیشن‌های باز
                 const openCount = data.open_positions_count || 0;
                 document.getElementById('open-positions-count').innerText = `${openCount} / 3`;
-                document.getElementById('account-id-display').innerText = data.account_info;
-                document.getElementById('broker-connected-info').innerText = data.broker_info;
 
+                // ۵. عناوین حساب و وضعیت اتصال بروکر
+                document.getElementById('account-id-display').innerText = data.account_info;
+                document.getElementById('broker-connected-info').innerHTML = `<i class="fa-solid fa-server text-[10px] text-slate-500"></i> ${data.broker_info}`;
+
+                // وضعیت نشانگر زنده
+                const dot = document.getElementById('header-status-dot');
+                if (data.is_connected) {
+                    dot.className = "absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full animate-ping";
+                } else {
+                    dot.className = "absolute -top-1 -right-1 w-3.5 h-3.5 bg-slate-600 border-2 border-slate-900 rounded-full";
+                }
+
+                // ۶. دکمه ترید خودکار
                 const btnToggle = document.getElementById('btn-toggle-trading');
                 const lblToggle = document.getElementById('lbl-toggle-trading');
                 if (data.is_auto_trading) {
-                    btnToggle.className = "bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1.5 shadow-md shadow-emerald-950/40";
-                    lblToggle.innerText = "معامله خودکار فعال است (کلیک برای توقف)";
+                    btnToggle.className = "flex-1 sm:flex-none px-3.5 py-2.5 rounded-xl font-bold text-xs transition duration-200 flex items-center justify-center gap-2 shadow-md bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/50";
+                    lblToggle.innerText = "معامله خودکار فعال است (توقف)";
                 } else {
-                    btnToggle.className = "bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 px-3 py-2 rounded-lg font-bold text-xs transition flex items-center gap-1.5 shadow-md";
-                    lblToggle.innerText = "اجازه معامله به ربات (شروع معامله)";
+                    btnToggle.className = "flex-1 sm:flex-none px-3.5 py-2.5 rounded-xl font-bold text-xs transition duration-200 flex items-center justify-center gap-2 shadow-sm bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300";
+                    lblToggle.innerText = "اجازه معامله به ربات (شروع)";
                 }
 
                 renderOpenTrades(data.open_trades || []);
@@ -357,27 +554,44 @@ HTML_TEMPLATE = """
         function renderOpenTrades(trades) {
             const tableBody = document.getElementById('open-trades-table');
             if (!trades || trades.length === 0) {
-                tableBody.innerHTML = '<tr><td colspan="8" class="py-6 text-center text-gray-500">هیچ معامله بازی در بروکر وجود ندارد.</td></tr>';
+                tableBody.innerHTML = `
+                    <tr>
+                        <td colspan="9" class="py-8 text-center text-slate-500 font-normal">
+                            <i class="fa-solid fa-inbox text-2xl mb-2 block text-slate-600"></i>
+                            هیچ معامله بازی در بروکر وجود ندارد.
+                        </td>
+                    </tr>
+                `;
                 return;
             }
 
             let html = '';
             for (const t of trades) {
-                const sideColor = t.side === 'BUY' ? 'text-emerald-400 bg-emerald-950/40 border-emerald-800' : 'text-red-400 bg-red-950/40 border-red-800';
+                const sideColor = t.side === 'BUY' 
+                    ? 'text-emerald-400 bg-emerald-950/50 border-emerald-800' 
+                    : 'text-rose-400 bg-rose-950/50 border-rose-800';
+                
                 const pnlVal = Number(t.realized_pnl || 0);
-                const pnlColor = pnlVal >= 0 ? 'text-emerald-400' : 'text-red-400';
+                const pnlColor = pnlVal > 0 ? 'text-emerald-400' : (pnlVal < 0 ? 'text-rose-400' : 'text-slate-300');
                 const ticketDisplay = t.mt5_ticket ? '#' + t.mt5_ticket : String(t.trade_id);
 
+                const slVal = Number(t.stop_loss || 0);
+                const slDisplay = slVal > 0 ? slVal.toFixed(2) : '-';
+
+                const tpVal = Number(t.tp1 || t.tp || 0);
+                const tpDisplay = tpVal > 0 ? tpVal.toFixed(2) : '-';
+
                 html += `
-                    <tr class="hover:bg-gray-800/40 transition">
+                    <tr class="hover:bg-slate-800/30 transition border-b border-slate-800/50">
                         <td class="py-3 px-3 font-mono font-bold text-amber-300">${ticketDisplay}</td>
                         <td class="py-3 px-3 font-bold text-white">${t.symbol}</td>
-                        <td class="py-3 px-3"><span class="px-2 py-0.5 rounded border text-xs font-bold ${sideColor}">${t.side}</span></td>
-                        <td class="py-3 px-3 font-mono">${t.entry_price}</td>
-                        <td class="py-3 px-3 font-mono text-red-400">${t.stop_loss}</td>
-                        <td class="py-3 px-3 font-mono">${t.current_volume}</td>
+                        <td class="py-3 px-3"><span class="px-2 py-0.5 rounded border text-[11px] font-bold ${sideColor}">${t.side}</span></td>
+                        <td class="py-3 px-3 font-mono text-slate-300">${Number(t.entry_price || 0).toFixed(2)}</td>
+                        <td class="py-3 px-3 font-mono text-rose-400 font-semibold">${slDisplay}</td>
+                        <td class="py-3 px-3 font-mono text-emerald-400 font-semibold">${tpDisplay}</td>
+                        <td class="py-3 px-3 font-mono text-slate-300">${Number(t.current_volume || 0).toFixed(2)}</td>
                         <td class="py-3 px-3 font-mono font-bold ${pnlColor}">${pnlVal >= 0 ? '+' : ''}$${pnlVal.toFixed(2)}</td>
-                        <td class="py-3 px-3"><span class="text-xs text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">فعال (Open)</span></td>
+                        <td class="py-3 px-3 text-center"><span class="text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800 font-medium">فعال (Open)</span></td>
                     </tr>
                 `;
             }
@@ -397,7 +611,7 @@ HTML_TEMPLATE = """
 
         async function disconnectBroker() {
             if (!currentUser) return;
-            if (!confirm("آیا از قطع ارتباط کامل حساب خود اطمینان دارید؟")) return;
+            if (!confirm("آیا از قطع ارتباط کامل حساب خود و پاکسازی اطلاعات مطمئن هستید؟")) return;
             const res = await fetch('/api/user/disconnect', {
                 method: 'POST',
                 headers: {'X-User-Id': currentUser.user_id}
@@ -499,7 +713,7 @@ async def register_api(request: Request):
     password = data.get("password", "").strip()
     res = db.register_user(identifier, password)
     if not res:
-        raise HTTPException(status_code=400, detail="این شماره/ایمیل قبلاً ثبت شده یا کلمه عبور کوتاه است.")
+        raise HTTPException(status_code=400, detail="این شماره/ایمیل قبلاً ثبت شده یا کلمه عبور کمتر از ۴ کاراکتر است.")
     return res
 
 
@@ -523,36 +737,52 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
         user_cfg = db.get_user_broker_config(x_user_id)
         user_cfg["user_id"] = x_user_id
 
+        m_login = str(user_cfg.get("mt5_login", "")).strip()
+        b_key = str(user_cfg.get("binance_api_key", "")).strip()
+
+        # در صورتی که کاربر هیچ بروکری متصل نکرده یا قطع ارتباط زده، مقادیر کاملاً صفر و قطع نمایش یابد
+        if not m_login and not b_key:
+            return {
+                "equity": 0.0,
+                "daily_pnl": 0.0,
+                "drawdown_pct": 0.0,
+                "open_positions_count": 0,
+                "open_trades": [],
+                "account_info": "حساب متصل نیست",
+                "broker_info": "جهت اتصال از بخش «تنظیمات و اتصال متاتریدر» استفاده کنید.",
+                "is_connected": False,
+                "is_auto_trading": False,
+            }
+
         equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
         bridge_snap = account_config.get_user_bridge_snapshot(user_cfg)
 
         summary = db.get_portfolio_summary(user_id=x_user_id)
-        open_trades_list = db.get_user_open_trades(user_id=x_user_id)
+        open_trades_list = db.get_user_open_trades(user_id=x_user_id) if is_conn else []
 
-        # محاسبه دقیق و قطعی سود و زیان واقعی حساب
         real_pnl = 0.0
         drawdown_pct = 0.0
 
-        if bridge_snap:
+        if is_conn and bridge_snap:
             hist_pnl = float(bridge_snap.get("history_pnl", 0.0))
             float_pnl = float(bridge_snap.get("floating_pnl", 0.0))
 
-            if hist_pnl != 0.0:
+            if hist_pnl != 0.0 or float_pnl != 0.0:
                 real_pnl = round(hist_pnl + float_pnl, 2)
             elif equity > 0:
-                # محاسبه تفاوت بالانس واقعی حساب با دیپازیت اولیه ۱۰۰ هزار دلار (دقیقا +$362.09)
                 bal = float(bridge_snap.get("balance", equity))
-                initial_deposit = float(bridge_snap.get("initial_deposit", 100000.0 if bal >= 50000 else bal))
-                real_pnl = round(equity - initial_deposit, 2)
+                init_dep = float(bridge_snap.get("initial_deposit", 0.0))
+                if init_dep > 0:
+                    real_pnl = round(equity - init_dep, 2)
 
             bal_val = float(bridge_snap.get("balance", equity))
             if bal_val > 0 and equity < bal_val:
                 drawdown_pct = round(((bal_val - equity) / bal_val) * 100.0, 2)
-        else:
+        elif is_conn:
             real_pnl = summary.get("net_realized_pnl_usd", 0.0)
 
         return {
-            "equity": equity,
+            "equity": equity if is_conn else 0.0,
             "daily_pnl": real_pnl if is_conn else 0.0,
             "drawdown_pct": drawdown_pct if is_conn else 0.0,
             "open_positions_count": len(open_trades_list) if is_conn else 0,
@@ -560,20 +790,20 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
             "account_info": acc_info,
             "broker_info": broker_info,
             "is_connected": is_conn,
-            "is_auto_trading": bool(user_cfg.get("is_auto_trading", 0)),
+            "is_auto_trading": bool(user_cfg.get("is_auto_trading", 0)) if is_conn else False,
         }
-    except Exception as e:
-        # در صورت بروز تأخیر، مقادیر صفر نشوند و وضعیت اتصال حفظ شود
+    except Exception:
+        # حذف قطعی دیتای فرضی؛ در صورت هرگونه خطا وضعیت امن صفر بازگردانده می‌شود
         return {
-            "equity": 100362.09,
-            "daily_pnl": 362.09,
+            "equity": 0.0,
+            "daily_pnl": 0.0,
             "drawdown_pct": 0.0,
             "open_positions_count": 0,
             "open_trades": [],
-            "account_info": "اکانت متاتریدر 300260 (متصل)",
-            "broker_info": "بروکر: Aron Markets Ltd | ارتباط برخط ۲۴ ساعته فعال",
-            "is_connected": True,
-            "is_auto_trading": True,
+            "account_info": "در حال همگام‌سازی با سرور...",
+            "broker_info": "ارتباط زنده با متاتریدر برقرار نیست.",
+            "is_connected": False,
+            "is_auto_trading": False,
         }
 
 
@@ -611,8 +841,17 @@ def toggle_trading_api(x_user_id: Optional[str] = Header(None)):
 def disconnect_broker_api(x_user_id: Optional[str] = Header(None)):
     if not x_user_id:
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
+    
+    # ۱. قطع ارتباط و پاکسازی در دیتابیس
     db.disconnect_broker(x_user_id)
-    return {"status": "SUCCESS", "message": "ارتباط قطع شد."}
+    
+    # ۲. پاکسازی کش پوزیشن‌ها و کش زنده
+    user_cfg = db.get_user_broker_config(x_user_id)
+    ident = str(user_cfg.get("identifier", "")).strip().lower()
+    if ident and ident in account_config.BRIDGE_LIVE_DATA:
+        del account_config.BRIDGE_LIVE_DATA[ident]
+
+    return {"status": "SUCCESS", "message": "ارتباط با بروکر قطع شد و اطلاعات حساب با موفقیت پاکسازی گردید."}
 
 
 if __name__ == "__main__":
