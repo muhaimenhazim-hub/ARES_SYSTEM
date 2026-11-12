@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 14.5 (UNIVERSAL BROKER SUPPORT & PID-FILE SUPERVISOR)
+VERSION: 14.6 (VIRTUAL WINE DESKTOP, UNIVERSAL BROKER SUPPORT & EXACT PID TRACKING)
 ================================================================================
 """
 
@@ -18,10 +18,10 @@ INSTANCES_DIR = "/root/mt5_instances"
 BASE_MT5_DIR = "/root/.wine/drive_c/Program Files/MetaTrader 5"
 GLOBAL_CONFIG_SRC = "/root/mt5_config"
 
-# جدول نگاشت هوشمند بروکرهای جهانی به درگاه‌های دسترسی مستقیم
+# جدول نگاشت هوشمند نام استاندارد بروکرهای جهانی
 UNIVERSAL_BROKER_MAP = {
-    "metaquotes-demo": "access.metatrader5.com:443",
-    "metaquotes": "access.metatrader5.com:443",
+    "metaquotes-demo": "MetaQuotes-Demo",
+    "metaquotes": "MetaQuotes-Demo",
     "aronmarkets-demo": "AronMarkets-Demo",
     "aronmarkets-live": "AronMarkets-Live",
 }
@@ -29,8 +29,8 @@ UNIVERSAL_BROKER_MAP = {
 
 class AresMT5MultiManager:
     """
-    ناظر خودکار متاتریدر ۵ با پشتیبانی از تمامی بروکرهای معتبر جهان
-    و سیستم اختصاصی رصد پروسه‌ها از طریق PID فایل.
+    ناظر خودکار متاتریدر ۵ با پشتیبانی از تمامی بروکرهای معتبر جهان،
+    دسکتاپ مجازی ایزوله Wine و جلوگیری از اجرای پروسه‌های تکراری.
     """
 
     def __init__(self, db: Optional[AresDatabaseManager] = None):
@@ -46,41 +46,51 @@ class AresMT5MultiManager:
             return []
 
     def is_login_running(self, login: str) -> bool:
-        """بررسی دقیق و بدون خطای روشن بودن متاتریدر با استفاده از فایل PID"""
+        """بررسی دقیق روشن بودن متاتریدر کاربر بدون اجازه به اجرای تکراری"""
         clean_login = str(login).strip()
         if not clean_login:
             return False
 
-        user_dir = os.path.join(INSTANCES_DIR, clean_login)
+        user_dir = os.path.realpath(os.path.join(INSTANCES_DIR, clean_login))
         pid_file = os.path.join(user_dir, "mt5.pid")
 
-        # ۱. بررسی سلامت از روی فایل PID اختصاصی کاربر
+        # ۱. بررسی از روی نام دسکتاپ مجازی Wine اختصاصی کاربر
+        try:
+            res = subprocess.run(["pgrep", "-f", f"MT5_{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode == 0 and res.stdout.strip():
+                return True
+        except Exception:
+            pass
+
+        # ۲. بررسی دقیق مسیر کاری (cwd) پروسه‌های فعال terminal64.exe
+        try:
+            res_t = subprocess.run(["pgrep", "-f", "terminal64.exe"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res_t.returncode == 0 and res_t.stdout.strip():
+                for pid_bytes in res_t.stdout.strip().splitlines():
+                    pid_str = pid_bytes.decode(errors="ignore").strip()
+                    if not pid_str:
+                        continue
+                    try:
+                        cwd = os.path.realpath(f"/proc/{pid_str}/cwd")
+                        if cwd == user_dir:
+                            return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # ۳. بررسی فایل PID اختصاصی کاربر
         if os.path.exists(pid_file):
             try:
                 with open(pid_file, "r") as f:
                     pid = int(f.read().strip())
-                # بررسی اینکه آیا پروسه هنوز در لینوکس زنده است
                 os.kill(pid, 0)
                 return True
             except (OSError, ValueError):
-                # پروسه بسته شده؛ فایل قدیمی پاک می‌شود
                 try:
                     os.remove(pid_file)
                 except Exception:
                     pass
-
-        # ۲. بررسی تکمیلی از طریق لیست پروسه‌های سیستم
-        try:
-            res = subprocess.run(["pgrep", "-f", f"mt5_instances/{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if res.returncode == 0 and res.stdout.strip():
-                return True
-
-            if clean_login == "300260":
-                res3 = subprocess.run(["pgrep", "-f", "MetaTrader 5/terminal64.exe"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if res3.returncode == 0 and res3.stdout.strip():
-                    return True
-        except Exception:
-            pass
 
         return False
 
@@ -93,7 +103,7 @@ class AresMT5MultiManager:
         if not login or not password:
             return None
 
-        # تبدیل هوشمند نام بروکر به درگاه اتصال رسمی در صورت نیاز
+        # تبدیل هوشمند نام بروکر به نام رسمی داخل servers.dat
         server_lower = server_raw.lower()
         server_endpoint = UNIVERSAL_BROKER_MAP.get(server_lower, server_raw)
 
@@ -190,7 +200,7 @@ Period=M15
         return user_dir
 
     def launch_instance(self, user: Dict[str, Any]) -> bool:
-        """اجرای متاتریدر اختصاصی با ثبت پلاک پروسه (PID) و بستن پاپ‌آپ‌ها"""
+        """اجرای متاتریدر اختصاصی داخل دسکتاپ مجازی ایزوله Wine و ثبت PID"""
         login = str(user.get("mt5_login", "")).strip()
         server = str(user.get("mt5_server", "MetaQuotes-Demo")).strip()
 
@@ -199,18 +209,19 @@ Period=M15
             return False
 
         pid_file = os.path.join(user_dir, "mt5.pid")
+        desktop_name = f"MT5_{login}"
+        wine_log = os.path.join(user_dir, "wine_mt5.log")
 
-        # دستور اجرای پس‌زمینه با ذخیره شماره پروسه در فایل mt5.pid
+        # اجرای متاتریدر در دسکتاپ مجازی اختصاصی Wine روی مانیتور :99
         launch_cmd = (
             f"cd '{user_dir}' && "
-            f"DISPLAY=:99 nohup wine terminal64.exe /portable /config:mt5_start.ini > /dev/null 2>&1 & "
+            f"DISPLAY=:99 nohup wine explorer /desktop={desktop_name},1280x1024 terminal64.exe /portable /config:mt5_start.ini > '{wine_log}' 2>&1 & "
             f"echo $! > '{pid_file}'"
         )
 
-        print(f"🚀 [ARES CLOUD MANAGER]: در حال اجرای متاتریدر اکانت {login} ({server})...", flush=True)
+        print(f"🚀 [ARES CLOUD MANAGER]: در حال اجرای متاتریدر اکانت {login} ({server}) روی دسکتاپ {desktop_name}...", flush=True)
         try:
             subprocess.run(launch_cmd, shell=True, check=False)
-            # بستن خودکار پاپ‌آپ‌های اولیه پنجره
             dismiss_cmd = "(sleep 4 && DISPLAY=:99 xdotool key Escape Return 2>/dev/null) &"
             subprocess.run(dismiss_cmd, shell=True, check=False)
             return True
@@ -229,7 +240,7 @@ Period=M15
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.5 - اتصال جهانی و بدون وقفه) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.6 - دسکتاپ مجازی Wine و اتصال جهانی) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         while True:

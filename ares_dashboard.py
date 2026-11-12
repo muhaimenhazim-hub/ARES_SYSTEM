@@ -679,14 +679,21 @@ async def bridge_sync_api(request: Request):
         identifier = str(data.get("identifier", "")).strip().lower()
         login_str = str(data.get("login", "")).strip()
 
-        account_config.update_bridge_data(identifier or login_str, data)
-
         # همگام‌سازی لحظه‌ای پوزیشن‌های واقعی داخل متاتریدر ۵ با دیتابیس سرور
         matched_user = db.get_user_by_identifier_or_login(identifier, login_str)
-        if matched_user and "open_positions" in data and isinstance(data["open_positions"], list):
-            db.sync_mt5_live_positions(matched_user["user_id"], data["open_positions"])
+        extra_keys: List[str] = []
+        if matched_user:
+            extra_keys = [
+                str(matched_user.get("user_id", "")).strip().lower(),
+                str(matched_user.get("identifier", "")).strip().lower(),
+            ]
+            if "open_positions" in data and isinstance(data["open_positions"], list):
+                db.sync_mt5_live_positions(matched_user["user_id"], data["open_positions"])
 
-        pending_orders = account_config.pop_pending_mt5_commands(identifier=identifier, login_str=login_str)
+        account_config.update_bridge_data(identifier or login_str, data, extra_keys=extra_keys)
+        pending_orders = account_config.pop_pending_mt5_commands(
+            identifier=identifier, login_str=login_str, extra_keys=extra_keys
+        )
         return {"status": "SYNCED", "orders": pending_orders}
     except Exception:
         return {"status": "SYNCED", "orders": []}

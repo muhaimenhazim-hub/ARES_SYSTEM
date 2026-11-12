@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.2 (STRICT QUEUE DEDUPLICATION, IN-FLIGHT TRACKING & SAFETY CAPS)
+VERSION: 14.3 (STRICT QUEUE DEDUPLICATION, AUTO-EXPIRING TTL & FULL KEY SYNC)
 ================================================================================
 """
 
@@ -15,6 +15,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "ares_user_config.json")
 BRIDGE_CACHE_FILE = os.path.join(BASE_DIR, "ares_bridge_cache.json")
 COMMANDS_FILE = os.path.join(BASE_DIR, "ares_mt5_pending_commands.json")
+COMMAND_TTL_SECONDS = 600.0
 
 BRIDGE_LIVE_DATA: Dict[str, Dict[str, Any]] = {}
 
@@ -48,22 +49,50 @@ def _save_json_file(file_path: str, data: Dict[str, Any]) -> None:
         pass
 
 
-def update_bridge_data(identifier: str, data: Dict[str, Any]):
+def _prune_expired_commands(all_cmds: Dict[str, Any], ttl_seconds: float = COMMAND_TTL_SECONDS) -> Tuple[Dict[str, Any], bool]:
+    """پاکسازی خودکار دستورات منقضی‌شده و کلیدهای خالی جهت جلوگیری از قفل دائمی صف"""
+    now_ts = time.time()
+    modified = False
+    for key in list(all_cmds.keys()):
+        cmds = all_cmds.get(key)
+        if not isinstance(cmds, list) or not cmds:
+            del all_cmds[key]
+            modified = True
+            continue
+        fresh_cmds = [
+            c for c in cmds
+            if isinstance(c, dict) and (now_ts - float(c.get("created_ts", 0.0))) <= ttl_seconds
+        ]
+        if len(fresh_cmds) != len(cmds):
+            modified = True
+        if fresh_cmds:
+            all_cmds[key] = fresh_cmds
+        else:
+            del all_cmds[key]
+            modified = True
+    return all_cmds, modified
+
+
+def update_bridge_data(identifier: str, data: Dict[str, Any], extra_keys: Optional[List[str]] = None):
     """دریافت زنده دیتای حساب، پوزیشن‌های واقعی و لیست نمادهای فعال از متاتریدر"""
     now_ts = time.time()
     data["last_sync_ts"] = now_ts
 
     clean_id = str(identifier).strip().lower()
-    login_str = str(data.get("login", "")).strip()
+    login_str = str(data.get("login", "")).strip().lower()
 
     cache = _load_json_file(BRIDGE_CACHE_FILE)
 
-    if clean_id:
-        BRIDGE_LIVE_DATA[clean_id] = data
-        cache[clean_id] = data
-    if login_str:
-        BRIDGE_LIVE_DATA[login_str] = data
-        cache[login_str] = data
+    keys = {clean_id, login_str}
+    if extra_keys:
+        for ek in extra_keys:
+            if ek and str(ek).strip():
+                keys.add(str(ek).strip().lower())
+
+    for k in keys:
+        if k:
+            BRIDGE_LIVE_DATA[k] = data
+            cache[k] = data
 
     _save_json_file(BRIDGE_CACHE_FILE, cache)
 
@@ -101,7 +130,7 @@ def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, An
 
     bridge = get_user_bridge_snapshot(user_cfg) if user_cfg else None
     if bridge:
-        known_symbols = bridge.get("active_symbols", [])
+        known_symbols = list(bridge.get("active_symbols", []))
         if "open_positions" in bridge and isinstance(bridge["open_positions"], list):
             known_symbols.extend([p.get("symbol") for p in bridge["open_positions"] if p.get("symbol")])
 
@@ -121,7 +150,9 @@ def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, An
 
 def get_user_pending_commands_count(target_keys: List[str]) -> int:
     """شمارش سفارشات منتظر در صف برای جلوگیری از ارسال مازاد بر ۳ پوزیشن"""
-    all_cmds = _load_json_file(COMMANDS_FILE)
+    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
+    if modified:
+        _save_json_file(COMMANDS_FILE, all_cmds)
     unique_cmd_ids = set()
     for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
         for cmd in all_cmds.get(key, []):
@@ -133,7 +164,9 @@ def get_user_pending_commands_count(target_keys: List[str]) -> int:
 
 def is_symbol_in_pending_queue(target_keys: List[str], symbol: str) -> bool:
     """بررسی اینکه آیا سفارشی برای این نماد در صف منتظر اجرا است یا خیر"""
-    all_cmds = _load_json_file(COMMANDS_FILE)
+    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
+    if modified:
+        _save_json_file(COMMANDS_FILE, all_cmds)
     clean_target = symbol.replace(" ", "").replace(".", "").upper()
     for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
         for cmd in all_cmds.get(key, []):
@@ -148,8 +181,10 @@ def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg:
     ثبت دستور معاملاتی با اعمال فیلتر سخت‌گیرانه ضدتکرار (Anti-Duplication)
     و سقف‌گذاری قطعی حداکثر ۳ سفارش در صف
     """
-    all_cmds = _load_json_file(COMMANDS_FILE)
-    
+    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
+    if modified:
+        _save_json_file(COMMANDS_FILE, all_cmds)
+
     clean_keys = set(k.strip().lower() for k in target_keys if k and str(k).strip())
     if not clean_keys:
         return False
@@ -173,8 +208,10 @@ def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg:
             print(f"🛑 [رد سفارش تکراری]: دستور معاملاتی برای نماد {target_sym} قبلاً در صف ثبت شده و منتظر اجراست.", flush=True)
             return False
 
-    cmd_id = f"cmd_{int(time.time() * 1000)}_{os.urandom(2).hex()}"
+    now_ts = time.time()
+    cmd_id = f"cmd_{int(now_ts * 1000)}_{os.urandom(2).hex()}"
     command["cmd_id"] = cmd_id
+    command["created_ts"] = now_ts
 
     for key in clean_keys:
         if key not in all_cmds:
@@ -185,29 +222,46 @@ def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg:
     return True
 
 
-def pop_pending_mt5_commands(identifier: str = "", login_str: str = "") -> List[Dict[str, Any]]:
-    """تحویل دستورات به متاتریدر و جلوگیری از اجرای تکراری"""
+def pop_pending_mt5_commands(
+    identifier: str = "",
+    login_str: str = "",
+    extra_keys: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """تحویل دستورات به متاتریدر و پاکسازی کامل از تمامی کلیدهای مرتبط با کاربر"""
     clean_id = str(identifier).strip().lower()
     clean_login = str(login_str).strip().lower()
 
-    all_cmds = _load_json_file(COMMANDS_FILE)
+    keys_to_pop = [k for k in [clean_id, clean_login] if k]
+    if extra_keys:
+        for ek in extra_keys:
+            cek = str(ek).strip().lower()
+            if cek and cek not in keys_to_pop:
+                keys_to_pop.append(cek)
+
+    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
     collected: List[Dict[str, Any]] = []
     seen_ids = set()
-    modified = False
 
-    for key in [clean_id, clean_login]:
-        if key and key in all_cmds and all_cmds[key]:
+    for key in keys_to_pop:
+        if key in all_cmds and all_cmds[key]:
             for cmd in all_cmds[key]:
                 cid = cmd.get("cmd_id", str(cmd))
                 if cid not in seen_ids:
                     seen_ids.add(cid)
                     collected.append(cmd)
-            all_cmds[key] = []
+            del all_cmds[key]
+            modified = True
+
+    if seen_ids:
+        for k in list(all_cmds.keys()):
+            remaining = [c for c in all_cmds[k] if c.get("cmd_id", str(c)) not in seen_ids]
+            if remaining:
+                all_cmds[k] = remaining
+            else:
+                del all_cmds[k]
             modified = True
 
     if modified:
-        for k in list(all_cmds.keys()):
-            all_cmds[k] = [c for c in all_cmds[k] if c.get("cmd_id", str(c)) not in seen_ids]
         _save_json_file(COMMANDS_FILE, all_cmds)
 
     return collected
