@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 03: MASTER SETUP ENGINE
-VERSION: 14.0 (LIVE MARKET ENTRY ANCHORING & STRICT SL/TP VALIDATION)
+VERSION: 14.1 (LIVE MARKET ENTRY ANCHORING, STRICT SL/TP & FLOAT PRECISION FIX)
 ================================================================================
 """
 
@@ -315,7 +315,8 @@ class MasterSetupEngine:
         sl_distance = abs(entry_price - stop_loss)
         rr_ratio = (abs(tp1 - entry_price) / sl_distance) if sl_distance > 0 else 0.0
 
-        if rr_ratio < self.min_rr_ratio:
+        # اعمال تلورانس بسیار جزئی ممیز شناور برای جلوگیری از رد اشتباه نسبت دقیق 1.5
+        if (rr_ratio + 1e-6) < self.min_rr_ratio:
             return SetupOpportunity(
                 opportunity_id=opp_id,
                 symbol=symbol,

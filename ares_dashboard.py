@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 14.6 (PROFESSIONAL FINTECH UI, MOBILE-RESPONSIVE & ZERO MOCK DATA)
+VERSION: 14.7 (CLEAN CACHE PURGE ON DISCONNECT/SWITCH, LOGIN=0 GUARD & PRICE PRECISION)
 ================================================================================
 """
 
@@ -122,7 +122,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
                 <h1 class="text-2xl font-black text-white tracking-wider flex items-center justify-center gap-2">
                     <span>ARES AI</span>
-                    <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">V14.6</span>
+                    <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">V14.7</span>
                 </h1>
                 <p class="text-xs text-slate-400 mt-1 font-normal">سامانه مدیریت معاملات هوشمند و الگوریتمی تحت کلود</p>
             </div>
@@ -190,7 +190,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="relative flex items-center justify-center w-11 h-11 rounded-xl bg-gradient-to-tr from-emerald-600 to-emerald-400 text-white shadow-md shadow-emerald-950">
                     <i class="fa-solid fa-robot text-lg"></i>
                     <span id="header-status-dot" class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full animate-ping"></span>
-                    <span class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full"></span>
+                    <span id="header-status-dot-solid" class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full"></span>
                 </div>
                 <div>
                     <div class="flex items-center gap-2 flex-wrap">
@@ -257,7 +257,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <i class="fa-solid fa-chart-line"></i>
                     </span>
                 </div>
-                <!-- خط رنگ سود/زیان: سبز برای سود، قرمز برای ضرر -->
                 <div class="text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-slate-400" id="daily-pnl">$0.00</div>
                 <div class="text-[11px] text-slate-400 mt-2">بر اساس تاریخچه واقعی بروکر</div>
             </div>
@@ -282,7 +281,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <i class="fa-solid fa-shield-halved"></i>
                     </span>
                 </div>
-                <!-- رنگ ضرر متناسب با ریسک: سبز برای ۰، کهربایی برای زیر ۵٪، قرمز آتشین برای بالای ۵٪ -->
                 <div class="text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-emerald-400" id="drawdown-val">0.00%</div>
                 <div class="text-[11px] text-slate-400 mt-2">سقف مجاز افت حساب: 12%</div>
             </div>
@@ -294,7 +292,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
                 <h2 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
                     <span class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
-                    <span>پوزیشن‌های باز واقعی در متاتریدر ۵</span>
+                    <span>پوزیشن‌های باز واقعی در متاتریدر ۵ / بایننس</span>
                 </h2>
                 <span class="text-xs text-slate-500 font-mono" id="table-live-refresh-timer">برخط (Real-Time)</span>
             </div>
@@ -403,7 +401,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         let currentAuthMode = 'login';
 
-        // مقداردهی اولیه صفحه بر اساس لاگین بودن کاربر
         if (currentUser && currentUser.user_id) {
             document.getElementById('main-dashboard').classList.remove('hidden');
             document.getElementById('auth-container').classList.add('hidden');
@@ -418,6 +415,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const loginBtn = document.getElementById('tab-login-btn');
             const regBtn = document.getElementById('tab-register-btn');
             const submitTxt = document.getElementById('auth-submit-txt');
+            document.getElementById('auth-error-msg').classList.add('hidden');
 
             if (mode === 'login') {
                 loginBtn.className = "flex-1 py-2.5 text-xs sm:text-sm font-bold text-white bg-slate-800 rounded-lg shadow transition";
@@ -473,9 +471,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         function initDashboard() {
             if (!currentUser) return;
-            document.getElementById('user-display-badge').innerText = `👤 کاربر: ${currentUser.identifier}`;
+            document.getElementById('user-display-badge').innerText = `کاربر: ${currentUser.identifier}`;
             fetchUserStatus();
             setInterval(fetchUserStatus, 2000);
+        }
+
+        function formatPrice(val, symbol) {
+            const num = Number(val || 0);
+            if (!isFinite(num) || num <= 0) return '-';
+            const sym = String(symbol || '').toUpperCase();
+            if (num < 0.1) return num.toFixed(6);
+            if (sym.includes('JPY')) return num.toFixed(3);
+            if (num < 10 || sym.includes('EUR') || sym.includes('GBP') || sym.includes('AUD') || sym.includes('NZD') || sym.includes('CAD') || sym.includes('CHF')) {
+                return num.toFixed(5);
+            }
+            return num.toFixed(2);
         }
 
         async function fetchUserStatus() {
@@ -490,11 +500,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 }
                 const data = await res.json();
 
-                // ۱. بروزرسانی موجودی واقعی (Equity)
                 const eq = Number(data.equity || 0);
                 document.getElementById('equity-val').innerText = `$${eq.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 
-                // ۲. بروزرسانی سود و زیان خالص کل با خط رنگ مناسب
                 const pnl = Number(data.daily_pnl || 0);
                 const pnlElem = document.getElementById('daily-pnl');
                 if (pnl > 0) {
@@ -508,7 +516,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     pnlElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-slate-400";
                 }
 
-                // ۳. بروزرسانی درصد افت سرمایه (Drawdown) با رنگ متناسب با ریسک ضرر
                 const dd = Number(data.drawdown_pct || 0);
                 const ddElem = document.getElementById('drawdown-val');
                 ddElem.innerText = `${dd.toFixed(2)}%`;
@@ -520,23 +527,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     ddElem.className = "text-2xl sm:text-3xl font-extrabold font-mono mt-3 text-rose-500 animate-pulse";
                 }
 
-                // ۴. پوزیشن‌های باز
                 const openCount = data.open_positions_count || 0;
                 document.getElementById('open-positions-count').innerText = `${openCount} / 3`;
 
-                // ۵. عناوین حساب و وضعیت اتصال بروکر
                 document.getElementById('account-id-display').innerText = data.account_info;
                 document.getElementById('broker-connected-info').innerHTML = `<i class="fa-solid fa-server text-[10px] text-slate-500"></i> ${data.broker_info}`;
 
-                // وضعیت نشانگر زنده
                 const dot = document.getElementById('header-status-dot');
+                const dotSolid = document.getElementById('header-status-dot-solid');
                 if (data.is_connected) {
                     dot.className = "absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full animate-ping";
+                    dotSolid.className = "absolute -top-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-slate-900 rounded-full";
                 } else {
                     dot.className = "absolute -top-1 -right-1 w-3.5 h-3.5 bg-slate-600 border-2 border-slate-900 rounded-full";
+                    dotSolid.className = "absolute -top-1 -right-1 w-3.5 h-3.5 bg-slate-600 border-2 border-slate-900 rounded-full";
                 }
 
-                // ۶. دکمه ترید خودکار
                 const btnToggle = document.getElementById('btn-toggle-trading');
                 const lblToggle = document.getElementById('lbl-toggle-trading');
                 if (data.is_auto_trading) {
@@ -575,21 +581,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const pnlColor = pnlVal > 0 ? 'text-emerald-400' : (pnlVal < 0 ? 'text-rose-400' : 'text-slate-300');
                 const ticketDisplay = t.mt5_ticket ? '#' + t.mt5_ticket : String(t.trade_id);
 
-                const slVal = Number(t.stop_loss || 0);
-                const slDisplay = slVal > 0 ? slVal.toFixed(2) : '-';
-
-                const tpVal = Number(t.tp1 || t.tp || 0);
-                const tpDisplay = tpVal > 0 ? tpVal.toFixed(2) : '-';
+                const entryDisplay = formatPrice(t.entry_price, t.symbol);
+                const slDisplay = formatPrice(t.stop_loss, t.symbol);
+                const tpDisplay = formatPrice(t.tp1 || t.tp, t.symbol);
+                const volNum = Number(t.current_volume || 0);
+                const volDisplay = volNum < 0.01 ? volNum.toFixed(4) : volNum.toFixed(2);
 
                 html += `
                     <tr class="hover:bg-slate-800/30 transition border-b border-slate-800/50">
                         <td class="py-3 px-3 font-mono font-bold text-amber-300">${ticketDisplay}</td>
                         <td class="py-3 px-3 font-bold text-white">${t.symbol}</td>
                         <td class="py-3 px-3"><span class="px-2 py-0.5 rounded border text-[11px] font-bold ${sideColor}">${t.side}</span></td>
-                        <td class="py-3 px-3 font-mono text-slate-300">${Number(t.entry_price || 0).toFixed(2)}</td>
+                        <td class="py-3 px-3 font-mono text-slate-300">${entryDisplay}</td>
                         <td class="py-3 px-3 font-mono text-rose-400 font-semibold">${slDisplay}</td>
                         <td class="py-3 px-3 font-mono text-emerald-400 font-semibold">${tpDisplay}</td>
-                        <td class="py-3 px-3 font-mono text-slate-300">${Number(t.current_volume || 0).toFixed(2)}</td>
+                        <td class="py-3 px-3 font-mono text-slate-300">${volDisplay}</td>
                         <td class="py-3 px-3 font-mono font-bold ${pnlColor}">${pnlVal >= 0 ? '+' : ''}$${pnlVal.toFixed(2)}</td>
                         <td class="py-3 px-3 text-center"><span class="text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800 font-medium">فعال (Open)</span></td>
                     </tr>
@@ -664,6 +670,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 alert("اطلاعات حساب با موفقیت ذخیره شد و به بروکر متصل گردید.");
                 closeSettingsModal();
                 fetchUserStatus();
+            } else {
+                const errData = await res.json().catch(() => ({}));
+                alert(errData.detail || "خطا در ذخیره اطلاعات حساب");
             }
         }
     </script>
@@ -679,13 +688,17 @@ async def bridge_sync_api(request: Request):
         identifier = str(data.get("identifier", "")).strip().lower()
         login_str = str(data.get("login", "")).strip()
 
-        # همگام‌سازی لحظه‌ای پوزیشن‌های واقعی داخل متاتریدر ۵ با دیتابیس سرور
+        # اگر ترمینال هنوز لاگین نشده (login == 0)، کش و معاملات باز نباید خراب شوند
+        if login_str in ("", "0"):
+            return {"status": "NOT_LOGGED_IN", "orders": []}
+
         matched_user = db.get_user_by_identifier_or_login(identifier, login_str)
         extra_keys: List[str] = []
         if matched_user:
             extra_keys = [
                 str(matched_user.get("user_id", "")).strip().lower(),
                 str(matched_user.get("identifier", "")).strip().lower(),
+                str(matched_user.get("mt5_login", "")).strip().lower(),
             ]
             if "open_positions" in data and isinstance(data["open_positions"], list):
                 db.sync_mt5_live_positions(matched_user["user_id"], data["open_positions"])
@@ -747,7 +760,6 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
         m_login = str(user_cfg.get("mt5_login", "")).strip()
         b_key = str(user_cfg.get("binance_api_key", "")).strip()
 
-        # در صورتی که کاربر هیچ بروکری متصل نکرده یا قطع ارتباط زده، مقادیر کاملاً صفر و قطع نمایش یابد
         if not m_login and not b_key:
             return {
                 "equity": 0.0,
@@ -777,7 +789,6 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
             if hist_pnl != 0.0 or float_pnl != 0.0:
                 real_pnl = round(hist_pnl + float_pnl, 2)
             elif equity > 0:
-                bal = float(bridge_snap.get("balance", equity))
                 init_dep = float(bridge_snap.get("initial_deposit", 0.0))
                 if init_dep > 0:
                     real_pnl = round(equity - init_dep, 2)
@@ -786,7 +797,8 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
             if bal_val > 0 and equity < bal_val:
                 drawdown_pct = round(((bal_val - equity) / bal_val) * 100.0, 2)
         elif is_conn:
-            real_pnl = summary.get("net_realized_pnl_usd", 0.0)
+            open_floating = sum(float(t.get("realized_pnl", 0.0) or 0.0) for t in open_trades_list)
+            real_pnl = round(float(summary.get("net_realized_pnl_usd", 0.0)) + open_floating, 2)
 
         return {
             "equity": equity if is_conn else 0.0,
@@ -800,7 +812,6 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
             "is_auto_trading": bool(user_cfg.get("is_auto_trading", 0)) if is_conn else False,
         }
     except Exception:
-        # حذف قطعی دیتای فرضی؛ در صورت هرگونه خطا وضعیت امن صفر بازگردانده می‌شود
         return {
             "equity": 0.0,
             "daily_pnl": 0.0,
@@ -830,8 +841,18 @@ def get_user_config_api(x_user_id: Optional[str] = Header(None)):
 async def save_user_config_api(request: Request, x_user_id: Optional[str] = Header(None)):
     if not x_user_id:
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
+
+    old_cfg = db.get_user_broker_config(x_user_id)
+    old_login = str(old_cfg.get("mt5_login", "")).strip()
+    old_ident = str(old_cfg.get("identifier", "")).strip().lower()
+
     new_cfg = await request.json()
     db.save_user_broker_config(x_user_id, new_cfg)
+
+    new_login = str(new_cfg.get("mt5_login", "")).strip()
+    if old_login and old_login != new_login:
+        account_config.clear_user_bridge_cache([old_login, x_user_id, old_ident])
+
     return {"status": "SUCCESS", "message": "تنظیمات با موفقیت ذخیره شد."}
 
 
@@ -848,15 +869,13 @@ def toggle_trading_api(x_user_id: Optional[str] = Header(None)):
 def disconnect_broker_api(x_user_id: Optional[str] = Header(None)):
     if not x_user_id:
         raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
-    
-    # ۱. قطع ارتباط و پاکسازی در دیتابیس
-    db.disconnect_broker(x_user_id)
-    
-    # ۲. پاکسازی کش پوزیشن‌ها و کش زنده
+
     user_cfg = db.get_user_broker_config(x_user_id)
     ident = str(user_cfg.get("identifier", "")).strip().lower()
-    if ident and ident in account_config.BRIDGE_LIVE_DATA:
-        del account_config.BRIDGE_LIVE_DATA[ident]
+    old_login = str(user_cfg.get("mt5_login", "")).strip()
+
+    db.disconnect_broker(x_user_id)
+    account_config.clear_user_bridge_cache([x_user_id, ident, old_login])
 
     return {"status": "SUCCESS", "message": "ارتباط با بروکر قطع شد و اطلاعات حساب با موفقیت پاکسازی گردید."}
 

@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 14.3 (MULTI-TENANT SUPPORT, MT5 + BINANCE LIVE SYNC, ZERO GHOST TRADES)
+VERSION: 14.4 (CLEAN BROKER DISCONNECT/SWITCH, MT5 + BINANCE LIVE SYNC)
 ================================================================================
 """
 
@@ -172,7 +172,7 @@ class AresDatabaseManager:
         clean_login = str(mt5_login).strip()
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            if clean_login:
+            if clean_login and clean_login != "0":
                 cursor.execute("""
                     SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_server
                     FROM user_broker_configs c
@@ -222,6 +222,11 @@ class AresDatabaseManager:
         now = datetime.now(timezone.utc).isoformat()
         existing = self.get_user_broker_config(user_id)
 
+        old_mt5_login = str(existing.get("mt5_login", "")).strip()
+        new_mt5_login = str(cfg.get("mt5_login", existing.get("mt5_login", ""))).strip()
+        old_b_key = str(existing.get("binance_api_key", "")).strip()
+        new_b_key = str(cfg.get("binance_api_key", existing.get("binance_api_key", ""))).strip()
+
         mt5_pass = str(cfg.get("mt5_pass", "")).strip() or existing.get("mt5_pass", "")
         b_secret = str(cfg.get("binance_secret_key", "")).strip() or existing.get("binance_secret_key", "")
 
@@ -243,14 +248,28 @@ class AresDatabaseManager:
             """, (
                 user_id,
                 cfg.get("trading_mode", "LIVE"),
-                str(cfg.get("binance_api_key", existing.get("binance_api_key", ""))).strip(),
+                new_b_key,
                 b_secret,
-                str(cfg.get("mt5_login", existing.get("mt5_login", ""))).strip(),
+                new_mt5_login,
                 mt5_pass,
                 str(cfg.get("mt5_server", existing.get("mt5_server", ""))).strip(),
                 existing.get("is_auto_trading", 0),
                 now,
             ))
+
+            if old_mt5_login and new_mt5_login != old_mt5_login:
+                cursor.execute("""
+                    UPDATE trades
+                    SET status = 'CLOSED', closed_at = ?, exit_reason = 'BROKER_CHANGED'
+                    WHERE user_id = ? AND status = 'OPEN' AND market = 'FOREX_OR_INDICES';
+                """, (now, user_id))
+
+            if old_b_key and new_b_key != old_b_key:
+                cursor.execute("""
+                    UPDATE trades
+                    SET status = 'CLOSED', closed_at = ?, exit_reason = 'BROKER_CHANGED'
+                    WHERE user_id = ? AND status = 'OPEN' AND market = 'CRYPTO_FUTURES';
+                """, (now, user_id))
 
     def toggle_auto_trading(self, user_id: str) -> bool:
         with self._get_connection() as conn:
@@ -262,13 +281,19 @@ class AresDatabaseManager:
             return bool(new_val)
 
     def disconnect_broker(self, user_id: str):
+        now = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE user_broker_configs
-                SET binance_api_key = '', binance_secret_key = '', mt5_login = '', mt5_pass = '', mt5_server = '', is_auto_trading = 0
+                SET binance_api_key = '', binance_secret_key = '', mt5_login = '', mt5_pass = '', mt5_server = '', is_auto_trading = 0, updated_at = ?
                 WHERE user_id = ?;
-            """, (user_id,))
+            """, (now, user_id))
+            cursor.execute("""
+                UPDATE trades
+                SET status = 'CLOSED', closed_at = ?, exit_reason = 'USER_DISCONNECTED'
+                WHERE user_id = ? AND status = 'OPEN';
+            """, (now, user_id))
 
     def get_auto_trading_users(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:

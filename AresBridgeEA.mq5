@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V14.3 |
-//|     EXACT BROKER R:R (sl_dist/tp_dist), 3-POS GATE & AUTO-SYMBOL |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V14.4 |
+//|  ACTIVE SYMBOLS SYNC, INDEX ALIAS RESOLUTION & EXACT 1:1.5 R:R   |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.30"
+#property version   "14.40"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.3 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
+   Print("🚀 ARES Bridge V14.4 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
 }
@@ -47,44 +47,184 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| تشخیص هوشمند نام دقیق نماد در بروکر (با نقطه یا پسوند)           |
+//| بررسی فعال و قابل معامله بودن یک نماد در بروکر                  |
+//+------------------------------------------------------------------+
+bool TryActivateSymbol(string sym)
+{
+   if(sym == "") return false;
+   if(!SymbolSelect(sym, true)) return false;
+
+   long tradeMode = SymbolInfoInteger(sym, SYMBOL_TRADE_MODE);
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED) return false;
+
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   if(bid <= 0.0)
+   {
+      Sleep(100);
+      bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   }
+   return (bid > 0.0);
+}
+
+//+------------------------------------------------------------------+
+//| تشخیص هوشمند نام دقیق نماد در بروکر (با پشتیبانی از شاخص‌ها)    |
 //+------------------------------------------------------------------+
 string ResolveBrokerSymbol(string rawSymbol)
 {
    string clean = rawSymbol;
    StringReplace(clean, ".", "");
    StringReplace(clean, " ", "");
+   string cleanUpper = clean;
+   StringToUpper(cleanUpper);
 
-   // ۱. بررسی نام مستقیم یا همراه با نقطه (مخصوص آرون مارکتس)
-   string candidates[6];
+   // ۱. پشتیبانی ویژه از نام‌های متفاوت شاخص NASDAQ 100 در بروکرها
+   if(cleanUpper == "NAS100" || cleanUpper == "NASDAQ100" || cleanUpper == "NASDAQ" ||
+      cleanUpper == "USTEC" || cleanUpper == "US100" || cleanUpper == "NDX100" ||
+      cleanUpper == "NDX" || cleanUpper == "NQ")
+   {
+      string nasCandidates[13];
+      nasCandidates[0]  = rawSymbol;
+      nasCandidates[1]  = "NAS100.";
+      nasCandidates[2]  = "NAS100";
+      nasCandidates[3]  = "USTEC.";
+      nasCandidates[4]  = "USTEC";
+      nasCandidates[5]  = "US100.";
+      nasCandidates[6]  = "US100";
+      nasCandidates[7]  = "NDX100";
+      nasCandidates[8]  = "NDX";
+      nasCandidates[9]  = "US100Cash";
+      nasCandidates[10] = "NAS100_i";
+      nasCandidates[11] = "NAS100m";
+      nasCandidates[12] = "NASDAQ";
+
+      for(int i = 0; i < 13; i++)
+      {
+         if(TryActivateSymbol(nasCandidates[i])) return nasCandidates[i];
+      }
+
+      int totalNas = SymbolsTotal(false);
+      for(int i = 0; i < totalNas; i++)
+      {
+         string symName = SymbolName(i, false);
+         string symUpper = symName;
+         StringToUpper(symUpper);
+         if(StringFind(symUpper, "NAS100") == 0 || StringFind(symUpper, "USTEC") == 0 ||
+            StringFind(symUpper, "US100") == 0 || StringFind(symUpper, "NDX") == 0 ||
+            StringFind(symUpper, "NASDAQ") == 0)
+         {
+            if(TryActivateSymbol(symName)) return symName;
+         }
+      }
+      return rawSymbol;
+   }
+
+   // ۲. پشتیبانی ویژه از نام‌های متفاوت شاخص S&P 500 در بروکرها
+   if(cleanUpper == "US500" || cleanUpper == "SP500" || cleanUpper == "SPX500" ||
+      cleanUpper == "SPX" || cleanUpper == "S&P500" || cleanUpper == "ES")
+   {
+      string spCandidates[11];
+      spCandidates[0]  = rawSymbol;
+      spCandidates[1]  = "US500.";
+      spCandidates[2]  = "US500";
+      spCandidates[3]  = "SP500.";
+      spCandidates[4]  = "SP500";
+      spCandidates[5]  = "SPX500.";
+      spCandidates[6]  = "SPX500";
+      spCandidates[7]  = "SPX";
+      spCandidates[8]  = "US500Cash";
+      spCandidates[9]  = "US500_i";
+      spCandidates[10] = "US500m";
+
+      for(int i = 0; i < 11; i++)
+      {
+         if(TryActivateSymbol(spCandidates[i])) return spCandidates[i];
+      }
+
+      int totalSp = SymbolsTotal(false);
+      for(int i = 0; i < totalSp; i++)
+      {
+         string symName = SymbolName(i, false);
+         string symUpper = symName;
+         StringToUpper(symUpper);
+         if(StringFind(symUpper, "US500") == 0 || StringFind(symUpper, "SP500") == 0 ||
+            StringFind(symUpper, "SPX500") == 0 || StringFind(symUpper, "SPX") == 0)
+         {
+            if(TryActivateSymbol(symName)) return symName;
+         }
+      }
+      return rawSymbol;
+   }
+
+   // ۳. سایر نمادها (جفت‌ارزها و طلا)
+   string candidates[10];
    candidates[0] = rawSymbol;
    candidates[1] = clean + ".";
    candidates[2] = clean;
    candidates[3] = clean + "_i";
    candidates[4] = clean + "m";
    candidates[5] = clean + ".a";
+   candidates[6] = clean + ".pro";
+   candidates[7] = (cleanUpper == "XAUUSD") ? "GOLD." : rawSymbol;
+   candidates[8] = (cleanUpper == "XAUUSD") ? "GOLD"  : rawSymbol;
+   candidates[9] = (cleanUpper == "XAUUSD") ? "GOLDm" : rawSymbol;
 
-   for(int i = 0; i < 6; i++)
+   for(int i = 0; i < 10; i++)
    {
-      if(SymbolSelect(candidates[i], true))
-      {
-         double bid = SymbolInfoDouble(candidates[i], SYMBOL_BID);
-         if(bid > 0) return candidates[i];
-      }
+      if(TryActivateSymbol(candidates[i])) return candidates[i];
    }
 
-   // ۲. جستجو در کل نمادهای بروکر
    int total = SymbolsTotal(false);
    for(int i = 0; i < total; i++)
    {
       string symName = SymbolName(i, false);
-      if(StringFind(symName, clean) == 0)
+      string symUpper = symName;
+      StringToUpper(symUpper);
+      if(StringFind(symUpper, cleanUpper) == 0)
       {
-         SymbolSelect(symName, true);
-         return symName;
+         if(TryActivateSymbol(symName)) return symName;
       }
    }
    return rawSymbol;
+}
+
+//+------------------------------------------------------------------+
+//| ساخت لیست نمادهای واقعی بروکر جهت ارسال به سرور ARES             |
+//+------------------------------------------------------------------+
+string BuildActiveSymbolsJson()
+{
+   string json = "[";
+   int total = SymbolsTotal(false);
+   int added = 0;
+
+   for(int i = 0; i < total && added < 60; i++)
+   {
+      string symName = SymbolName(i, false);
+      string upper = symName;
+      StringToUpper(upper);
+
+      bool relevant = (
+         StringFind(upper, "EURUSD") >= 0 ||
+         StringFind(upper, "XAU") >= 0 ||
+         StringFind(upper, "GOLD") >= 0 ||
+         StringFind(upper, "NAS") >= 0 ||
+         StringFind(upper, "USTEC") >= 0 ||
+         StringFind(upper, "US100") >= 0 ||
+         StringFind(upper, "NDX") >= 0 ||
+         StringFind(upper, "US500") >= 0 ||
+         StringFind(upper, "SP500") >= 0 ||
+         StringFind(upper, "SPX") >= 0
+      );
+
+      if(!relevant) continue;
+
+      StringReplace(symName, "\"", "");
+      if(added > 0) json += ",";
+      json += "\"" + symName + "\"";
+      added++;
+   }
+
+   json += "]";
+   return json;
 }
 
 //+------------------------------------------------------------------+
@@ -276,7 +416,7 @@ void ExecuteSingleOrderJson(string orderObj)
          }
       }
 
-      // --- سد دفاعی ۳: اعمال سقف حجم ایمن هر معامله ---
+      // --- سد دفاعی ۳: اعمال سقف حجم ایمن و نرمال‌سازی دقیق گام حجم ---
       if(volume > InpMaxLotCap)
       {
          Print("⚠️ [ARES EA GATE]: حجم ارسالی (", volume, " لات) از سقف مجاز (", InpMaxLotCap, " لات) بیشتر بود؛ به سقف ایمن کاهش یافت.");
@@ -286,9 +426,18 @@ void ExecuteSingleOrderJson(string orderObj)
       double minVol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
       double maxVol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
       double step   = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
-      if(step > 0) volume = MathFloor(volume / step) * step;
+      int volDigits = 2;
+      if(step > 0.0)
+      {
+         if(step >= 1.0) volDigits = 0;
+         else if(step >= 0.1) volDigits = 1;
+         else if(step >= 0.01) volDigits = 2;
+         else volDigits = 3;
+         volume = MathFloor((volume / step) + 1e-9) * step;
+      }
       if(volume < minVol) volume = minVol;
       if(volume > maxVol) volume = maxVol;
+      volume = NormalizeDouble(volume, volDigits);
 
       double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
       double bid = SymbolInfoDouble(sym, SYMBOL_BID);
@@ -380,7 +529,7 @@ void ExecuteSingleOrderJson(string orderObj)
             }
          }
       }
-      Print("🔥 Order Executed [", action, " ", sym, " Vol:", volume, " SL:", DoubleToString(normSL, digits), " TP:", DoubleToString(normTP, digits), "] Result: ", ok, " Retcode: ", ExtTrade.ResultRetcodeDescription());
+      Print("🔥 Order Executed [", action, " ", sym, " (raw:", rawSymbol, ") Vol:", volume, " SL:", DoubleToString(normSL, digits), " TP:", DoubleToString(normTP, digits), "] Result: ", ok, " Retcode: ", ExtTrade.ResultRetcodeDescription());
    }
    else if(action == "CLOSE")
    {
@@ -415,10 +564,12 @@ void ExecuteSingleOrderJson(string orderObj)
 }
 
 //+------------------------------------------------------------------+
-//| ارسال وضعیت زنده حساب، سود واقعی و پوزیشن‌ها به سرور            |
+//| ارسال وضعیت زنده حساب، سود واقعی، پوزیشن‌ها و نمادها به سرور    |
 //+------------------------------------------------------------------+
 void SyncAccountWithServer()
 {
+   static int lastWebErr = 0;
+
    long   login   = AccountInfoInteger(ACCOUNT_LOGIN);
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -432,12 +583,13 @@ void SyncAccountWithServer()
    double historyPnL     = CalculateRealHistoryPnL(initialDeposit);
    double floatingPnL    = 0.0;
    string openPosJson    = BuildOpenPositionsJson(floatingPnL);
+   string activeSymsJson = BuildActiveSymbolsJson();
 
    string ident = (InpUserIdentifier != "") ? InpUserIdentifier : IntegerToString(login);
 
    string payload = StringFormat(
-      "{\"identifier\":\"%s\",\"login\":%I64d,\"balance\":%.2f,\"equity\":%.2f,\"history_pnl\":%.2f,\"floating_pnl\":%.2f,\"initial_deposit\":%.2f,\"broker\":\"%s\",\"server\":\"%s\",\"open_positions\":%s}",
-      ident, login, balance, equity, historyPnL, floatingPnL, initialDeposit, company, server, openPosJson
+      "{\"identifier\":\"%s\",\"login\":%I64d,\"balance\":%.2f,\"equity\":%.2f,\"history_pnl\":%.2f,\"floating_pnl\":%.2f,\"initial_deposit\":%.2f,\"broker\":\"%s\",\"server\":\"%s\",\"open_positions\":%s,\"active_symbols\":%s}",
+      ident, login, balance, equity, historyPnL, floatingPnL, initialDeposit, company, server, openPosJson, activeSymsJson
    );
 
    char postData[];
@@ -452,8 +604,18 @@ void SyncAccountWithServer()
    int res = WebRequest("POST", InpServerURL, headers, 3000, postData, resultData, resultHeaders);
    if(res == 200)
    {
+      lastWebErr = 0;
       string responseStr = CharArrayToString(resultData, 0, WHOLE_ARRAY, CP_UTF8);
       ProcessServerOrders(responseStr);
+   }
+   else
+   {
+      int err = GetLastError();
+      if(err != lastWebErr)
+      {
+         lastWebErr = err;
+         Print("⚠️ [ARES Sync Error] HTTP=", res, " LastError=", err);
+      }
    }
 }
 //+------------------------------------------------------------------+

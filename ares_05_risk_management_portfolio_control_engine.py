@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 05: RISK MANAGEMENT & PORTFOLIO CONTROL ENGINE
-VERSION: 14.2 (HARD LOT CAPS, EXACT CONTRACT SIZING & DRAWDOWN PROTECTION)
+VERSION: 14.3 (HARD LOT CAPS, DYNAMIC STEP PRECISION & DRAWDOWN PROTECTION)
 ================================================================================
 """
 
@@ -133,7 +133,7 @@ class RiskManagementPortfolioEngine:
         risk_usd: float,
         specs: ContractSpecs,
     ) -> Tuple[float, float, float]:
-        """محاسبه دقیق حجم با رعایت سقف‌های ایمنی سرسختانه"""
+        """محاسبه دقیق حجم با رعایت سقف‌های ایمنی و دقت واقعی گام حجم هر نماد"""
         contract_size = specs.contract_size
         clean_symbol = specs.symbol.replace(" ", "").replace(".", "").upper()
 
@@ -157,8 +157,10 @@ class RiskManagementPortfolioEngine:
 
         step = specs.volume_step
         if step > 0:
-            rounded_volume = np.floor(raw_volume / step) * step
-            rounded_volume = round(rounded_volume, 2)
+            step_str = f"{step:.8f}".rstrip("0")
+            decimals = len(step_str.split(".")[1]) if "." in step_str else 0
+            rounded_volume = float(np.floor((raw_volume / step) + 1e-9) * step)
+            rounded_volume = round(rounded_volume, decimals)
         else:
             rounded_volume = round(raw_volume, 2)
 

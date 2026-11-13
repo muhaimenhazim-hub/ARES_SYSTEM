@@ -2,16 +2,14 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 14.8 (EXACT MT5 CHART EA FORMAT, ISOLATED BINARIES & AUTO-COMPILE)
+VERSION: 14.9 (NO BUILD DOWNGRADE, AUTO-STOP DISCONNECTED, STAGGERED BOOT & AUTO-EA)
 ================================================================================
 """
 
-import glob
 import hashlib
 import os
 import shutil
 import subprocess
-import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -34,7 +32,7 @@ UNIVERSAL_BROKER_MAP = {
 class AresMT5MultiManager:
     """
     ناظر خودکار متاتریدر ۵ با پشتیبانی از تمامی بروکرهای معتبر جهان،
-    دسکتاپ مجازی ایزوله Wine، کامپایل خودکار اکسپرت و تزریق دقیق چارت فعال.
+    دسکتاپ مجازی ایزوله Wine، کامپایل خودکار اکسپرت و جلوگیری از بازگشت بیلد آپدیت‌شده.
     """
 
     def __init__(self, db: Optional[AresDatabaseManager] = None):
@@ -49,9 +47,18 @@ class AresMT5MultiManager:
             print(f"⚠️ [خطای دیتابیس در خواندن حساب‌ها]: {e}", flush=True)
             return []
 
+    def _get_base_ea_stamp(self) -> str:
+        base_ex5 = os.path.join(BASE_MT5_DIR, "MQL5", "Experts", "AresBridgeEA.ex5")
+        if os.path.exists(base_ex5):
+            try:
+                return str(int(os.path.getmtime(base_ex5)))
+            except Exception:
+                pass
+        return "0"
+
     @staticmethod
-    def _cred_hash(login: str, password: str, server: str) -> str:
-        raw = f"{login}|{password}|{server}".encode("utf-8")
+    def _cred_hash(login: str, password: str, server: str, ea_stamp: str = "0") -> str:
+        raw = f"{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
         return hashlib.md5(raw).hexdigest()
 
     def ensure_base_ea_compiled(self):
@@ -92,9 +99,10 @@ class AresMT5MultiManager:
             print(f"⚠️ [خطای کامپایل اکسپرت]: {e}", flush=True)
 
     def stop_login_instance(self, login: str):
-        """توقف ایمن متاتریدر یک کاربر خاص (در صورت تغییر رمز یا سرور)"""
+        """توقف ایمن متاتریدر یک کاربر خاص (هنگام قطع ارتباط یا تغییر رمز/سرور)"""
         clean_login = str(login).strip()
         user_dir = os.path.realpath(os.path.join(INSTANCES_DIR, clean_login))
+        pid_file = os.path.join(user_dir, "mt5.pid")
         try:
             res_t = subprocess.run(["pgrep", "-f", "terminal64.exe"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res_t.returncode == 0 and res_t.stdout.strip():
@@ -109,6 +117,8 @@ class AresMT5MultiManager:
                     except Exception:
                         pass
             subprocess.run(["pkill", "-9", "-f", f"MT5_{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if os.path.exists(pid_file):
+                os.remove(pid_file)
         except Exception:
             pass
 
@@ -163,7 +173,7 @@ class AresMT5MultiManager:
 
     @staticmethod
     def _ensure_default_chart_with_ea(user_dir: str, symbol: str, user_identifier: str):
-        """ساخت چارت پیش‌فرض با فرمت دقیق متاتریدر شامل path و expertmode=1"""
+        """ساخت چارت پیش‌فرض با فرمت دقیق متاتریدر شامل path، expertmode=1 و شناسه کاربر"""
         charts_default_dir = os.path.join(user_dir, "MQL5", "Profiles", "Charts", "Default")
         os.makedirs(charts_default_dir, exist_ok=True)
         chart_path = os.path.join(charts_default_dir, "chart01.chr")
@@ -177,6 +187,7 @@ class AresMT5MultiManager:
                     "path=Experts\\AresBridgeEA.ex5" in txt
                     and "expertmode=1" in txt
                     and f"symbol={symbol}" in txt
+                    and f"InpUserIdentifier={user_identifier}" in txt
                 ):
                     needs_write = False
             except Exception:
@@ -263,7 +274,7 @@ name=Main
                 except Exception:
                     pass
 
-        # ۱. کپی ایزوله فایل‌های اجرایی متاتریدر (بدون هاردلینک جهت جلوگیری از قفل Error 32)
+        # ۱. کپی ایزوله فایل‌های اجرایی متاتریدر (جلوگیری از بازگشت بیلد آپدیت‌شده به نسخه پایه قدیمی)
         if os.path.exists(BASE_MT5_DIR):
             for fname in os.listdir(BASE_MT5_DIR):
                 src = os.path.join(BASE_MT5_DIR, fname)
@@ -272,9 +283,9 @@ name=Main
                     try:
                         need_copy = not os.path.exists(dst)
                         if not need_copy:
-                            st_src = os.stat(src)
                             st_dst = os.stat(dst)
-                            if st_dst.st_nlink > 1 or st_dst.st_size != st_src.st_size:
+                            # فقط هاردلینک قدیمی حذف و کپی می‌شود؛ نسخه آپدیت‌شده توسط LiveUpdate حفظ می‌گردد
+                            if st_dst.st_nlink > 1:
                                 os.remove(dst)
                                 need_copy = True
                         if need_copy:
@@ -358,10 +369,10 @@ Period=M15
         with open(ini_path, "w", encoding="utf-8") as f:
             f.write(ini_content)
 
-        # ثبت هش مشخصات ورود فعلی برای تشخیص تغییرات بعدی کاربر
+        # ثبت هش مشخصات ورود و بیلد اکسپرت برای تشخیص تغییرات بعدی
         cred_file = os.path.join(user_dir, ".cred_hash")
         with open(cred_file, "w", encoding="utf-8") as f:
-            f.write(self._cred_hash(login, password, server_endpoint))
+            f.write(self._cred_hash(login, password, server_endpoint, self._get_base_ea_stamp()))
 
         return user_dir
 
@@ -378,7 +389,6 @@ Period=M15
         desktop_name = f"MT5_{login}"
         wine_log = os.path.join(user_dir, "wine_mt5.log")
 
-        # اجرای متاتریدر در دسکتاپ مجازی اختصاصی Wine روی مانیتور :99
         launch_cmd = (
             f"cd '{user_dir}' && "
             f"DISPLAY=:99 WINEDEBUG=-all nohup wine explorer /desktop={desktop_name},1280x1024 terminal64.exe /portable /config:mt5_start.ini > '{wine_log}' 2>&1 & "
@@ -396,8 +406,27 @@ Period=M15
             return False
 
     def sync_all_user_instances(self):
-        """رصد دائم، تشخیص تغییر اطلاعات حساب و روشن کردن متاتریدر کاربران"""
+        """رصد دائم، توقف اکانت‌های قطع‌شده، تشخیص تغییر اکسپرت/رمز و اجرای نوبتی جهت حفظ CPU"""
+        self.ensure_base_ea_compiled()
+        ea_stamp = self._get_base_ea_stamp()
+
         accounts = self.get_configured_accounts()
+        active_logins = {
+            str(u.get("mt5_login", "")).strip()
+            for u in accounts
+            if str(u.get("mt5_login", "")).strip() and str(u.get("mt5_pass", "")).strip()
+        }
+
+        # ۱. توقف متاتریدر اکانت‌هایی که قطع ارتباط زده‌اند یا از دیتابیس تغییر یافته‌اند
+        if os.path.exists(INSTANCES_DIR):
+            for entry in os.listdir(INSTANCES_DIR):
+                entry_path = os.path.join(INSTANCES_DIR, entry)
+                if os.path.isdir(entry_path) and entry not in active_logins:
+                    if self.is_login_running(entry):
+                        print(f"🛑 [ARES CLOUD MANAGER]: توقف متاتریدر اکانت قطع‌شده ({entry})...", flush=True)
+                        self.stop_login_instance(entry)
+
+        # ۲. بررسی و اجرای نوبتی اکانت‌های فعال (حداکثر ۱ استارت در هر چرخه برای جلوگیری از قفل CPU)
         for user in accounts:
             login = str(user.get("mt5_login", "")).strip()
             password = str(user.get("mt5_pass", "")).strip()
@@ -411,22 +440,22 @@ Period=M15
                 if os.path.exists(cred_file):
                     try:
                         saved_hash = open(cred_file, "r", encoding="utf-8").read().strip()
-                        if saved_hash != self._cred_hash(login, password, server_endpoint):
-                            print(f"🔄 [ARES CLOUD MANAGER]: تغییر رمز/سرور برای {login} شناسایی شد؛ ری‌استارت اکانت...", flush=True)
+                        if saved_hash != self._cred_hash(login, password, server_endpoint, ea_stamp):
+                            print(f"🔄 [ARES CLOUD MANAGER]: تغییر رمز/سرور یا آپدیت اکسپرت برای {login}؛ ری‌استارت اکانت...", flush=True)
                             self.stop_login_instance(login)
                             time.sleep(2)
                             self.launch_instance(user)
-                            time.sleep(3)
+                            break
                     except Exception:
                         pass
                 continue
 
             self.launch_instance(user)
-            time.sleep(3)
+            break
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.8 - فرمت دقیق چارت اکسپرت) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.9 - مدیریت بهینه CPU، توقف خودکار و عدم بازگشت بیلد) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         while True:

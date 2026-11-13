@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 04: TRADE & POSITION MANAGEMENT ENGINE
-VERSION: 14.0 (LIVE UNREALIZED PNL, CONTRACT SIZE MULTIPLIER & DB RESTORE)
+VERSION: 14.1 (SAFE CRYPTO VOLUME FLOOR & DB OPEN_TIME PRESERVATION)
 ================================================================================
 """
 
@@ -88,8 +88,8 @@ class ManagedPosition:
             "market": self.market,
             "side": self.side.value,
             "entry_price": round(self.entry_price, 5),
-            "initial_volume": round(self.initial_volume, 4),
-            "current_volume": round(self.current_volume, 4),
+            "initial_volume": round(self.initial_volume, 6),
+            "current_volume": round(self.current_volume, 6),
             "stop_loss": round(self.stop_loss, 5),
             "initial_stop_loss": round(self.initial_stop_loss, 5),
             "targets": {
@@ -129,11 +129,22 @@ class TradePositionManagementEngine:
         self.trade_history: List[ManagedPosition] = []
 
     def restore_position_from_db(self, row: Dict[str, Any]):
-        """بازیابی پوزیشن باز از دیتابیس هنگام شروع مجدد برنامه"""
+        """بازیابی پوزیشن باز از دیتابیس هنگام شروع مجدد برنامه با حفظ زمان واقعی بازشدن"""
         pos_id = str(row["trade_id"])
         if pos_id in self.open_positions:
             return
         side = OrderSide.BUY if str(row.get("side", "BUY")).upper() == "BUY" else OrderSide.SELL
+
+        raw_opened = row.get("opened_at")
+        parsed_open_time = datetime.now(timezone.utc)
+        if isinstance(raw_opened, datetime):
+            parsed_open_time = raw_opened
+        elif isinstance(raw_opened, str) and raw_opened.strip():
+            try:
+                parsed_open_time = datetime.fromisoformat(raw_opened.strip().replace("Z", "+00:00"))
+            except Exception:
+                pass
+
         pos = ManagedPosition(
             position_id=pos_id,
             user_id=str(row.get("user_id", "default")),
@@ -153,6 +164,7 @@ class TradePositionManagementEngine:
             is_break_even=bool(row.get("is_break_even", 0)),
             realized_pnl=float(row.get("realized_pnl", 0.0)),
             total_fees_paid=float(row.get("total_fees", 0.0)),
+            open_time=parsed_open_time,
         )
         self.open_positions[pos_id] = pos
 
@@ -260,12 +272,12 @@ class TradePositionManagementEngine:
             )
             if tp1_reached:
                 pos.tp1_hit = True
-                close_vol = round(pos.initial_volume * self.tp1_ratio, 4)
+                close_vol = min(pos.current_volume, round(pos.initial_volume * self.tp1_ratio, 6))
                 pnl = ((pos.tp1 - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp1)) * close_vol * contract_size
                 fee = pos.tp1 * close_vol * self.taker_fee_pct
                 net_pnl = pnl - fee
 
-                pos.current_volume = max(0.01, round(pos.current_volume - close_vol, 4))
+                pos.current_volume = max(0.0, round(pos.current_volume - close_vol, 6))
                 pos.realized_pnl += net_pnl
                 pos.total_fees_paid += fee
                 pos.partial_exits.append(
@@ -290,12 +302,12 @@ class TradePositionManagementEngine:
             )
             if tp2_reached:
                 pos.tp2_hit = True
-                close_vol = round(pos.initial_volume * self.tp2_ratio, 4)
+                close_vol = min(pos.current_volume, round(pos.initial_volume * self.tp2_ratio, 6))
                 pnl = ((pos.tp2 - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - pos.tp2)) * close_vol * contract_size
                 fee = pos.tp2 * close_vol * self.taker_fee_pct
                 net_pnl = pnl - fee
 
-                pos.current_volume = max(0.01, round(pos.current_volume - close_vol, 4))
+                pos.current_volume = max(0.0, round(pos.current_volume - close_vol, 6))
                 pos.realized_pnl += net_pnl
                 pos.total_fees_paid += fee
                 pos.partial_exits.append(

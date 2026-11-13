@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.4 (QUEUE DEDUP, BINANCE REAL SL/TP ORDERS & LIVE POSITION SYNC)
+VERSION: 14.5 (STALE BRIDGE GUARD, CLEAN CACHE PURGE, BINANCE TTL & INDEX ALIASES)
 ================================================================================
 """
 
@@ -16,15 +16,24 @@ CONFIG_FILE = os.path.join(BASE_DIR, "ares_user_config.json")
 BRIDGE_CACHE_FILE = os.path.join(BASE_DIR, "ares_bridge_cache.json")
 COMMANDS_FILE = os.path.join(BASE_DIR, "ares_mt5_pending_commands.json")
 COMMAND_TTL_SECONDS = 600.0
+BRIDGE_STALE_SECONDS = 45.0
+BINANCE_BALANCE_CACHE_TTL = 8.0
 
 BRIDGE_LIVE_DATA: Dict[str, Dict[str, Any]] = {}
+_BINANCE_BALANCE_CACHE: Dict[str, Tuple[float, Tuple[float, str, str, bool]]] = {}
 
 # جدول نگاشت نمادهای استاندارد تحلیل تکنیکال به اسامی مرسوم در انواع بروکرهای متاتریدر
 BROKER_SYMBOL_ALIASES = {
-    "EURUSD": ["EURUSD.", "EURUSD", "EURUSD_i", "EURUSDm", "EURUSD.pro", "EURUSDraw"],
-    "XAUUSD": ["XAUUSD.", "XAUUSD", "GOLD", "GOLD.", "XAUUSD_i", "XAUUSDm", "GOLDm"],
-    "NASDAQ 100": ["NAS100", "NAS100.", "USTEC", "USTEC.", "US100", "US100.", "NQ", "NQ=F", "NASDAQ"],
-    "S&P 500": ["US500", "US500.", "SP500", "SP500.", "ES", "ES=F", "SPX500"],
+    "EURUSD": ["EURUSD.", "EURUSD", "EURUSD_i", "EURUSDm", "EURUSD.pro", "EURUSDraw", "EURUSD.a"],
+    "XAUUSD": ["XAUUSD.", "XAUUSD", "GOLD", "GOLD.", "XAUUSD_i", "XAUUSDm", "GOLDm", "XAUUSD.a"],
+    "NASDAQ 100": [
+        "NAS100", "NAS100.", "USTEC", "USTEC.", "US100", "US100.",
+        "NDX100", "NDX", "US100Cash", "NAS100_i", "NAS100m", "NQ", "NQ=F", "NASDAQ",
+    ],
+    "S&P 500": [
+        "US500", "US500.", "SP500", "SP500.", "SPX500", "SPX500.",
+        "SPX", "US500Cash", "US500_i", "US500m", "ES", "ES=F",
+    ],
 }
 
 
@@ -75,6 +84,9 @@ def _prune_expired_commands(all_cmds: Dict[str, Any], ttl_seconds: float = COMMA
 
 def update_bridge_data(identifier: str, data: Dict[str, Any], extra_keys: Optional[List[str]] = None):
     """دریافت زنده دیتای حساب، پوزیشن‌های واقعی و لیست نمادهای فعال از متاتریدر"""
+    if not isinstance(data, dict):
+        return
+
     now_ts = time.time()
     data["last_sync_ts"] = now_ts
 
@@ -90,54 +102,104 @@ def update_bridge_data(identifier: str, data: Dict[str, Any], extra_keys: Option
                 keys.add(str(ek).strip().lower())
 
     for k in keys:
-        if k:
+        if k and k != "0":
             BRIDGE_LIVE_DATA[k] = data
             cache[k] = data
 
     _save_json_file(BRIDGE_CACHE_FILE, cache)
 
 
-def get_user_bridge_snapshot(user_cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """دریافت اطلاعات زنده متاتریدر مختص همان کاربر"""
+def clear_user_bridge_cache(keys: List[str]) -> None:
+    """پاکسازی کامل کش زنده، فایل کش دیسک و صف دستورات معلق هنگام قطع ارتباط یا تغییر حساب"""
+    clean_keys = {str(k).strip().lower() for k in keys if k and str(k).strip()}
+    if not clean_keys:
+        return
+
+    for k in list(BRIDGE_LIVE_DATA.keys()):
+        if str(k).strip().lower() in clean_keys:
+            del BRIDGE_LIVE_DATA[k]
+
+    cache = _load_json_file(BRIDGE_CACHE_FILE)
+    cache_modified = False
+    for k in list(cache.keys()):
+        if str(k).strip().lower() in clean_keys:
+            del cache[k]
+            cache_modified = True
+    if cache_modified:
+        _save_json_file(BRIDGE_CACHE_FILE, cache)
+
+    all_cmds = _load_json_file(COMMANDS_FILE)
+    cmds_modified = False
+    for k in list(all_cmds.keys()):
+        if str(k).strip().lower() in clean_keys:
+            del all_cmds[k]
+            cmds_modified = True
+    if cmds_modified:
+        _save_json_file(COMMANDS_FILE, all_cmds)
+
+
+def get_user_bridge_snapshot(user_cfg: Dict[str, Any], allow_stale: bool = False) -> Optional[Dict[str, Any]]:
+    """دریافت اطلاعات زنده متاتریدر مختص همان کاربر همراه با بررسی تازگی زمان همگام‌سازی"""
     if not user_cfg:
         return None
 
     user_ident = str(user_cfg.get("identifier", "")).strip().lower()
-    m_login = str(user_cfg.get("mt5_login", "")).strip()
+    m_login = str(user_cfg.get("mt5_login", "")).strip().lower()
     user_id = str(user_cfg.get("user_id", "")).strip().lower()
 
     merged_data = _load_json_file(BRIDGE_CACHE_FILE)
     merged_data.update(BRIDGE_LIVE_DATA)
 
-    if m_login and m_login in merged_data:
-        return merged_data[m_login]
+    def _is_fresh(snap: Any) -> bool:
+        if not isinstance(snap, dict):
+            return False
+        if allow_stale:
+            return True
+        ts = float(snap.get("last_sync_ts", 0.0) or 0.0)
+        return ts > 0.0 and (time.time() - ts) <= BRIDGE_STALE_SECONDS
 
-    if user_ident and user_ident in merged_data:
-        return merged_data[user_ident]
-
-    if user_id and user_id in merged_data:
-        return merged_data[user_id]
+    for lookup_key in (m_login, user_ident, user_id):
+        if lookup_key and lookup_key in merged_data:
+            snap = merged_data[lookup_key]
+            if _is_fresh(snap):
+                return snap
 
     return None
 
 
 def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, Any]] = None) -> str:
     """
-    شناسایی خودکار و هوشمند پسوند/پیشوند بروکر کاربر.
+    شناسایی خودکار و هوشمند پسوند/پیشوند بروکر کاربر با اولویت لیست نمادهای واقعی بروکر.
     """
     clean_sym = canonical_symbol.strip()
     aliases = BROKER_SYMBOL_ALIASES.get(clean_sym, [clean_sym])
 
-    bridge = get_user_bridge_snapshot(user_cfg) if user_cfg else None
+    bridge = get_user_bridge_snapshot(user_cfg, allow_stale=True) if user_cfg else None
     if bridge:
-        known_symbols = list(bridge.get("active_symbols", []))
+        known_symbols: List[str] = []
+        for s in bridge.get("active_symbols", []):
+            if s and str(s).strip():
+                known_symbols.append(str(s).strip())
         if "open_positions" in bridge and isinstance(bridge["open_positions"], list):
-            known_symbols.extend([p.get("symbol") for p in bridge["open_positions"] if p.get("symbol")])
+            for p in bridge["open_positions"]:
+                if isinstance(p, dict) and p.get("symbol"):
+                    known_symbols.append(str(p["symbol"]).strip())
 
+        # ۱. تطبیق دقیق (حساس به حروف بزرگ/کوچک نیست)
         for alias in aliases:
+            alias_upper = alias.upper()
             for s in known_symbols:
-                if str(s).strip().upper() == alias.upper():
-                    return str(s).strip()
+                if s.upper() == alias_upper:
+                    return s
+
+        # ۲. تطبیق پیشوندی (برای نمادهایی با پسوندهای خاص مثل NAS100.c یا USTEC_ecn)
+        for alias in aliases:
+            alias_clean = alias.rstrip(".").upper()
+            if len(alias_clean) < 3:
+                continue
+            for s in known_symbols:
+                if s.upper().startswith(alias_clean):
+                    return s
 
         broker_name = str(bridge.get("broker", "")).lower()
         server_name = str(bridge.get("server", "")).lower()
@@ -200,7 +262,7 @@ def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg:
     if action in ["BUY", "SELL"]:
         current_pending = get_user_pending_commands_count(list(clean_keys))
         if current_pending >= 3:
-            print(f"🛑 [رد سفارش صف]: سقف ۳ سفارش همزمان در صف پر است.", flush=True)
+            print("🛑 [رد سفارش صف]: سقف ۳ سفارش همزمان در صف پر است.", flush=True)
             return False
 
         if is_symbol_in_pending_queue(list(clean_keys), target_sym):
@@ -267,11 +329,11 @@ def pop_pending_mt5_commands(
 
 
 def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, bool]:
-    """بررسی وضعیت اتصال و خواندن دقیق موجودی زنده از متاتریدر یا بایننس"""
+    """بررسی وضعیت اتصال و خواندن دقیق موجودی زنده از متاتریدر یا بایننس (همراه با گارد قطع ارتباط و کش بایننس)"""
     if not user_cfg:
         return 0.0, "حساب متصل نیست", "جهت اتصال از بخش تنظیمات حساب استفاده کنید.", False
 
-    bridge = get_user_bridge_snapshot(user_cfg)
+    bridge = get_user_bridge_snapshot(user_cfg, allow_stale=False)
     m_login = str(user_cfg.get("mt5_login", "")).strip()
     m_server = str(user_cfg.get("mt5_server", "")).strip()
 
@@ -283,6 +345,15 @@ def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, 
         return eq, f"اکانت متاتریدر {login_num} (متصل)", f"بروکر: {company} | سرور: {server} | ارتباط برخط ۲۴ ساعته فعال", True
 
     if m_login:
+        stale_bridge = get_user_bridge_snapshot(user_cfg, allow_stale=True)
+        if stale_bridge:
+            srv_label = m_server or stale_bridge.get("server", "پیش‌فرض")
+            return (
+                0.0,
+                f"اکانت متاتریدر {m_login} (عدم دریافت تیک زنده)",
+                f"سرور: {srv_label} | ارتباط متاتریدر موقتاً قطع یا در حال همگام‌سازی مجدد است",
+                False,
+            )
         return (
             0.0,
             f"اکانت متاتریدر {m_login} (در حال همگام‌سازی...)",
@@ -293,6 +364,11 @@ def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, 
     b_key = str(user_cfg.get("binance_api_key", "")).strip()
     b_secret = str(user_cfg.get("binance_secret_key", "")).strip()
     if b_key and b_secret:
+        now_ts = time.time()
+        cached_entry = _BINANCE_BALANCE_CACHE.get(b_key)
+        if cached_entry and (now_ts - cached_entry[0]) < BINANCE_BALANCE_CACHE_TTL:
+            return cached_entry[1]
+
         try:
             import ccxt
             exchange = ccxt.binanceusdm({
@@ -304,7 +380,9 @@ def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, 
             })
             balance_info = exchange.fetch_balance()
             real_equity = float(balance_info.get("total", {}).get("USDT", 0.0))
-            return real_equity, "بایننس فیوچرز (زنده)", f"صرافی متصل: بایننس | موجودی: {real_equity:.2f} USDT", True
+            result = (real_equity, "بایننس فیوچرز (زنده)", f"صرافی متصل: بایننس | موجودی: {real_equity:.2f} USDT", True)
+            _BINANCE_BALANCE_CACHE[b_key] = (now_ts, result)
+            return result
         except Exception:
             return 0.0, "خطای اتصال بایننس", "کلیدهای API بایننس نامعتبر هستند.", False
 

@@ -2,15 +2,13 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 14.3 (EXACT BROKER 1:1.5 R:R DISTANCE, BINANCE SL/TP & DB POSITION SYNC)
+VERSION: 14.4 (PER-BROKER EQUITY ISOLATION, REAL BINANCE SYNC & 1:1.5 R:R)
 ================================================================================
 """
 
 import os
 import sys
 import time
-import traceback
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import account_config
@@ -48,7 +46,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۳ - ریسک‌به‌ریوارد دقیق بروکر ۱:۱.۵ و تکمیل بایننس)")
+        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۴ - همگام‌سازی واقعی بایننس/متاتریدر و نسبت ۱:۱.۵)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -61,7 +59,6 @@ class AresMasterSystem:
         self.risk_engine = RiskManagementPortfolioEngine(initial_capital=100.0)
         self.trade_engine = TradePositionManagementEngine(mode=ExecutionMode.LIVE)
         self.last_scan_time: float = 0.0
-        self.last_db_sync_time: float = 0.0
         self.last_binance_sync_time: float = 0.0
 
         # قفل‌های حافظه بلادرنگ جهت مهار ۱۰۰٪ تاخیر پاسخ متاتریدر/صرافی
@@ -92,7 +89,7 @@ class AresMasterSystem:
         return [k.strip().lower() for k in keys if k and str(k).strip()]
 
     def _sync_binance_users_positions(self):
-        """همگام‌سازی لحظه‌ای پوزیشن‌های باز صرافی بایننس با دیتابیس و موتور مدیریت پوزیشن"""
+        """همگام‌سازی لحظه‌ای پوزیشن‌های باز صرافی بایننس با دیتابیس و پاکسازی حافظه پوزیشن‌های بسته‌شده"""
         now = time.time()
         if now - self.last_binance_sync_time < 15.0:
             return
@@ -109,68 +106,18 @@ class AresMasterSystem:
                     for cid in closed_ids:
                         if cid in self.trade_engine.open_positions:
                             del self.trade_engine.open_positions[cid]
+
+            # پاکسازی پوزیشن‌های بسته‌شده در MT5 یا بایننس از حافظه موقت موتور مدیریت
+            db_open_ids = {str(r["trade_id"]) for r in self.db.get_all_open_trades()}
+            for pos_id in list(self.trade_engine.open_positions.keys()):
+                if pos_id not in db_open_ids:
+                    del self.trade_engine.open_positions[pos_id]
         except Exception:
             pass
 
     def manage_active_positions_fast(self):
-        """مدیریت هوشمند پوزیشن‌های بایننس و همگام‌سازی با صرافی (معاملات MT5 مستقیماً در بروکر SL/TP دارند)"""
+        """مدیریت همگام‌سازی پوزیشن‌های باز با صرافی/بروکر (سفارش‌های MT5 و بایننس دارای SL/TP بومی هستند)"""
         self._sync_binance_users_positions()
-
-        if not self.trade_engine.open_positions:
-            return
-
-        now = time.time()
-        for pos_id, pos in list(self.trade_engine.open_positions.items()):
-            # معاملات متاتریدر دارای SL/TP بومی دقیق در بروکر هستند و نباید با قیمت یاهو زودهنگام بسته شوند
-            if pos.market != "CRYPTO_FUTURES":
-                continue
-
-            bundle = self.data_service.get_live_multitimeframe_bundle(pos.symbol)
-            if not bundle:
-                continue
-
-            last_candle = bundle["df_ltf"].iloc[-1]
-            specs = self.SYMBOLS_SPECS.get(pos.symbol)
-            contract_size = specs.contract_size if specs else 1.0
-
-            update = self.trade_engine.update_position_on_price_tick(
-                position_id=pos_id,
-                current_high=float(last_candle["high"]),
-                current_low=float(last_candle["low"]),
-                current_close=float(last_candle["close"]),
-                contract_size=contract_size,
-            )
-
-            user_cfg = self.db.get_user_broker_config(pos.user_id)
-
-            if update.get("events"):
-                for ev in update["events"]:
-                    print(f"\n⚡ [بایننس | کاربر {pos.user_id} | {pos.symbol}]: {ev}", flush=True)
-
-                if pos.is_break_even and user_cfg.get("binance_api_key"):
-                    account_config.update_binance_sl_to_breakeven(
-                        user_cfg=user_cfg,
-                        symbol=pos.symbol,
-                        side=pos.side.value,
-                        volume=pos.current_volume,
-                        new_sl=pos.stop_loss,
-                    )
-
-            if update.get("status") == "CLOSED":
-                pnl = update["position"]["realized_pnl"]
-                print(f"\n🔔 [تسویه معامله بایننس {pos.symbol}]: سود/زیان = {pnl:+.2f}$", flush=True)
-
-                if user_cfg.get("binance_api_key"):
-                    account_config.close_binance_position(
-                        user_cfg=user_cfg,
-                        symbol=pos.symbol,
-                        side=pos.side.value,
-                        volume=pos.initial_volume,
-                    )
-                self.db.record_new_trade(update["position"], user_id=pos.user_id)
-            elif update.get("status") == "OPEN" and (now - self.last_db_sync_time > 10.0):
-                self.db.record_new_trade(update["position"], user_id=pos.user_id)
-                self.last_db_sync_time = now
 
     @staticmethod
     def _round_volume_to_step(raw_vol: float, specs: ContractSpecs) -> float:
@@ -185,7 +132,7 @@ class AresMasterSystem:
         return vol
 
     def scan_for_opportunities(self):
-        """اسکن بازار و ارسال سفارش با رعایت سقف ۳ معامله، نسبت دقیق 1:1.5 و ثبت کامل در دیتابیس"""
+        """اسکن بازار و ارسال سفارش با رعایت سقف ۳ معامله، تفکیک موجودی بروکرها و نسبت دقیق 1:1.5"""
         active_users = self.db.get_auto_trading_users()
         if not active_users:
             return
@@ -199,15 +146,28 @@ class AresMasterSystem:
 
         for user in active_users:
             user_id = user["user_id"]
-            equity, acc_info, broker_info, is_connected = account_config.fetch_user_live_balance(user)
 
-            if not is_connected or equity <= 0:
+            # دریافت مجزای موجودی زنده MT5 و بایننس برای جلوگیری از تداخل سرمایه
+            mt5_equity, mt5_ok = 0.0, False
+            if str(user.get("mt5_login", "")).strip():
+                mt5_equity, _, _, mt5_ok = account_config.fetch_user_live_balance(user)
+
+            bin_equity, bin_ok = 0.0, False
+            b_key = str(user.get("binance_api_key", "")).strip()
+            b_sec = str(user.get("binance_secret_key", "")).strip()
+            if b_key and b_sec:
+                bin_equity, _, _, bin_ok = account_config.fetch_user_live_balance({
+                    "binance_api_key": b_key,
+                    "binance_secret_key": b_sec,
+                })
+
+            is_mt5_connected = mt5_ok and mt5_equity > 0
+            is_binance_connected = bin_ok and bin_equity > 0
+
+            if not is_mt5_connected and not is_binance_connected:
                 continue
 
             target_keys = self._get_user_routing_keys(user_id)
-
-            is_mt5_connected = ("متاتریدر" in acc_info) or bool(user.get("mt5_login"))
-            is_binance_connected = bool(user.get("binance_api_key") and user.get("binance_secret_key"))
 
             # ۱. شمارش همزمان: پوزیشن‌های فعال ثبت‌شده + سفارشات معلق در صف
             active_trades_db = self.db.get_user_open_trades(user_id=user_id)
@@ -277,7 +237,8 @@ class AresMasterSystem:
                 self.db.record_setup_evaluation(opportunity.to_dict())
 
                 if opportunity.status == "APPROVED":
-                    self.risk_engine.current_capital = equity
+                    trade_equity = bin_equity if is_crypto else mt5_equity
+                    self.risk_engine.current_capital = trade_equity
                     risk_decision = self.risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
 
                     if risk_decision.approved:
@@ -352,7 +313,7 @@ class AresMasterSystem:
                                 self.pending_trade_locks[lock_key] = time.time()
                                 self.symbol_last_candle_time[candle_key] = candle_ts_str
 
-                                print(f"\n📡 [سیگنال تایید شد -> ارسال ۱ معامله امن با نسبت دقیق 1:1.5 به متاتریدر ۵]:", flush=True)
+                                print("\n📡 [سیگنال تایید شد -> ارسال ۱ معامله امن با نسبت دقیق 1:1.5 به متاتریدر ۵]:", flush=True)
                                 print(f"   نماد بروکر: {broker_symbol} | جهت: {opportunity.direction} | حجم امن: {vol} لات", flush=True)
                                 print(f"   فاصله SL: {sl_dist} | فاصله TP (1:1.5): {tp_dist}", flush=True)
                                 print(f"   🔒 قفل حفاظتی نماد {broker_symbol} برای ۱۵ دقیقه فعال شد.", flush=True)
