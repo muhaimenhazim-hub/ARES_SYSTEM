@@ -2,16 +2,20 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 14.9 (NO BUILD DOWNGRADE, AUTO-STOP DISCONNECTED, STAGGERED BOOT & AUTO-EA)
+VERSION: 15.0 (ARONMARKETS SERVERS.DAT, CLEAN CONFIG ISOLATION & CLOUD FILE BRIDGE)
 ================================================================================
 """
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any, Dict, List, Optional
+
+import requests
 
 from ares_database import AresDatabaseManager
 
@@ -32,12 +36,32 @@ UNIVERSAL_BROKER_MAP = {
 class AresMT5MultiManager:
     """
     ناظر خودکار متاتریدر ۵ با پشتیبانی از تمامی بروکرهای معتبر جهان،
-    دسکتاپ مجازی ایزوله Wine، کامپایل خودکار اکسپرت و جلوگیری از بازگشت بیلد آپدیت‌شده.
+    دسکتاپ مجازی ایزوله Wine، کامپایل خودکار اکسپرت و پل ابری ضدخطای ۴۰۱۴.
     """
 
     def __init__(self, db: Optional[AresDatabaseManager] = None):
         self.db = db or AresDatabaseManager()
         os.makedirs(INSTANCES_DIR, exist_ok=True)
+        self._poisoned_hashes = self._compute_poisoned_hashes()
+
+    @staticmethod
+    def _file_md5(path: str) -> str:
+        if not os.path.exists(path):
+            return ""
+        try:
+            h = hashlib.md5()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return ""
+
+    def _compute_poisoned_hashes(self) -> Dict[str, str]:
+        return {
+            "accounts.dat": self._file_md5(os.path.join(GLOBAL_CONFIG_SRC, "accounts.dat")),
+            "common.ini": self._file_md5(os.path.join(GLOBAL_CONFIG_SRC, "common.ini")),
+        }
 
     def get_configured_accounts(self) -> List[Dict[str, Any]]:
         """دریافت تمام حساب‌های متاتریدر ثبت‌شده توسط کاربران از دیتابیس"""
@@ -58,7 +82,7 @@ class AresMT5MultiManager:
 
     @staticmethod
     def _cred_hash(login: str, password: str, server: str, ea_stamp: str = "0") -> str:
-        raw = f"{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
+        raw = f"V15|{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
         return hashlib.md5(raw).hexdigest()
 
     def ensure_base_ea_compiled(self):
@@ -131,7 +155,6 @@ class AresMT5MultiManager:
         user_dir = os.path.realpath(os.path.join(INSTANCES_DIR, clean_login))
         pid_file = os.path.join(user_dir, "mt5.pid")
 
-        # ۱. بررسی از روی نام دسکتاپ مجازی Wine اختصاصی کاربر
         try:
             res = subprocess.run(["pgrep", "-f", f"MT5_{clean_login}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res.returncode == 0 and res.stdout.strip():
@@ -139,7 +162,6 @@ class AresMT5MultiManager:
         except Exception:
             pass
 
-        # ۲. بررسی دقیق مسیر کاری (cwd) پروسه‌های فعال terminal64.exe
         try:
             res_t = subprocess.run(["pgrep", "-f", "terminal64.exe"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res_t.returncode == 0 and res_t.stdout.strip():
@@ -156,7 +178,6 @@ class AresMT5MultiManager:
         except Exception:
             pass
 
-        # ۳. بررسی فایل PID اختصاصی کاربر
         if os.path.exists(pid_file):
             try:
                 with open(pid_file, "r") as f:
@@ -242,6 +263,35 @@ name=Main
         except Exception:
             pass
 
+    def _clean_poisoned_user_configs(self, config_dir: str, login: str):
+        """حذف فایل‌های قدیمی کپی‌شده از ویندوز جهت جلوگیری از خطای امنیتی حساب و قفل شدن اکانت قبلی"""
+        acc_file = os.path.join(config_dir, "accounts.dat")
+        if os.path.exists(acc_file) and self._poisoned_hashes.get("accounts.dat"):
+            if self._file_md5(acc_file) == self._poisoned_hashes["accounts.dat"]:
+                try:
+                    os.remove(acc_file)
+                except Exception:
+                    pass
+
+        common_file = os.path.join(config_dir, "common.ini")
+        if os.path.exists(common_file):
+            should_remove = False
+            if self._poisoned_hashes.get("common.ini") and self._file_md5(common_file) == self._poisoned_hashes["common.ini"]:
+                should_remove = True
+            else:
+                try:
+                    raw = open(common_file, "rb").read()
+                    txt = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:100] else "utf-8", errors="ignore")
+                    if "6FD26B4E5B59" in txt or (f"Login={login}" not in txt and "Login=300260" in txt):
+                        should_remove = True
+                except Exception:
+                    pass
+            if should_remove:
+                try:
+                    os.remove(common_file)
+                except Exception:
+                    pass
+
     def setup_user_environment(self, user: Dict[str, Any]) -> Optional[str]:
         """آماده‌سازی خودکار پوشه ایزوله و فایل کانفیگ برای هر بروکر در دنیا"""
         login = str(user.get("mt5_login", "")).strip()
@@ -254,18 +304,18 @@ name=Main
 
         self.ensure_base_ea_compiled()
 
-        # تبدیل هوشمند نام بروکر به نام رسمی داخل servers.dat
         server_lower = server_raw.lower()
         server_endpoint = UNIVERSAL_BROKER_MAP.get(server_lower, server_raw)
 
         user_dir = os.path.join(INSTANCES_DIR, login)
         config_dir = os.path.join(user_dir, "config")
         experts_dir = os.path.join(user_dir, "MQL5", "Experts")
+        files_dir = os.path.join(user_dir, "MQL5", "Files")
 
         os.makedirs(config_dir, exist_ok=True)
         os.makedirs(experts_dir, exist_ok=True)
+        os.makedirs(files_dir, exist_ok=True)
 
-        # حذف لینک قدیمی پوشه Profiles در صورت وجود تا پروفایل اختصاصی کاربر اجرا شود
         for old_prof in ["Profiles", "profiles"]:
             old_prof_path = os.path.join(user_dir, old_prof)
             if os.path.islink(old_prof_path):
@@ -274,7 +324,7 @@ name=Main
                 except Exception:
                     pass
 
-        # ۱. کپی ایزوله فایل‌های اجرایی متاتریدر (جلوگیری از بازگشت بیلد آپدیت‌شده به نسخه پایه قدیمی)
+        # ۱. کپی ایزوله فایل‌های اجرایی متاتریدر (بدون بازگرداندن بیلد آپدیت‌شده)
         if os.path.exists(BASE_MT5_DIR):
             for fname in os.listdir(BASE_MT5_DIR):
                 src = os.path.join(BASE_MT5_DIR, fname)
@@ -284,7 +334,6 @@ name=Main
                         need_copy = not os.path.exists(dst)
                         if not need_copy:
                             st_dst = os.stat(dst)
-                            # فقط هاردلینک قدیمی حذف و کپی می‌شود؛ نسخه آپدیت‌شده توسط LiveUpdate حفظ می‌گردد
                             if st_dst.st_nlink > 1:
                                 os.remove(dst)
                                 need_copy = True
@@ -334,19 +383,46 @@ name=Main
             except Exception:
                 pass
 
-        # ۳. انتقال کانفیگ سرورها
-        if os.path.exists(GLOBAL_CONFIG_SRC):
-            subprocess.run(f"cp -rf '{GLOBAL_CONFIG_SRC}'/* '{config_dir}/' 2>/dev/null", shell=True, check=False)
+        # ۳. پاکسازی فایل‌های قدیمی و کپی اختصاصی سرورهای بروکر (servers.dat و certificates)
+        self._clean_poisoned_user_configs(config_dir, login)
+
+        aron_servers = os.path.join(GLOBAL_CONFIG_SRC, "servers_aronmarkets.dat")
+        default_servers = os.path.join(GLOBAL_CONFIG_SRC, "servers.dat")
+        target_servers = os.path.join(config_dir, "servers.dat")
+
+        if "aron" in server_lower and os.path.exists(aron_servers):
+            try:
+                shutil.copy2(aron_servers, target_servers)
+            except Exception:
+                pass
+        elif os.path.exists(default_servers) and not os.path.exists(target_servers):
+            try:
+                shutil.copy2(default_servers, target_servers)
+            except Exception:
+                pass
+
+        src_certs = os.path.join(GLOBAL_CONFIG_SRC, "certificates")
+        dst_certs = os.path.join(config_dir, "certificates")
+        if os.path.exists(src_certs) and not os.path.exists(dst_certs):
+            try:
+                shutil.copytree(src_certs, dst_certs, dirs_exist_ok=True)
+            except Exception:
+                pass
+
         for base_cfg_name in ["Config", "config"]:
             base_config = os.path.join(BASE_MT5_DIR, base_cfg_name)
-            if os.path.exists(base_config):
-                subprocess.run(f"cp -n '{base_config}'/* '{config_dir}/' 2>/dev/null", shell=True, check=False)
+            base_srv = os.path.join(base_config, "servers.dat")
+            if os.path.exists(base_srv) and not os.path.exists(target_servers):
+                try:
+                    shutil.copy2(base_srv, target_servers)
+                except Exception:
+                    pass
 
         # ۴. انتخاب هوشمند نماد استارت متناسب با بروکر و تزریق چارت پیش‌فرض با اکسپرت متصل
         start_symbol = "EURUSD." if "aron" in server_lower else "EURUSD"
         self._ensure_default_chart_with_ea(user_dir, start_symbol, identifier)
 
-        # ۵. ساخت فایل کانفیگ استارت متاتریدر
+        # ۵. ساخت فایل کانفیگ استارت متاتریدر با بخش رسمی [StartUp]
         ini_path = os.path.join(user_dir, "mt5_start.ini")
         ini_content = f"""[Common]
 Login={login}
@@ -359,9 +435,9 @@ AllowDllImport=1
 Enabled=1
 Account=1
 WebRequest=1
-WebRequestUrl=http://141.98.166.81,http://127.0.0.1,http://localhost
+WebRequestUrl=http://141.98.166.81
 
-[Start]
+[StartUp]
 Expert=AresBridgeEA
 Symbol={start_symbol}
 Period=M15
@@ -369,7 +445,6 @@ Period=M15
         with open(ini_path, "w", encoding="utf-8") as f:
             f.write(ini_content)
 
-        # ثبت هش مشخصات ورود و بیلد اکسپرت برای تشخیص تغییرات بعدی
         cred_file = os.path.join(user_dir, ".cred_hash")
         with open(cred_file, "w", encoding="utf-8") as f:
             f.write(self._cred_hash(login, password, server_endpoint, self._get_base_ea_stamp()))
@@ -405,6 +480,72 @@ Period=M15
             print(f"⚠️ [خطا در اتصال اکانت {login}]: {e}", flush=True)
             return False
 
+    def process_local_file_bridges(self):
+        """پل ارتباطی فایل محلی برای انتقال تیک‌ها و دستورات متاتریدرهای ابری بدون محدودیت ۴۰۱۴"""
+        if not os.path.exists(INSTANCES_DIR):
+            return
+
+        port = os.environ.get("PORT", "80")
+        sync_url = f"http://127.0.0.1:{port}/api/bridge/sync"
+
+        for entry in os.listdir(INSTANCES_DIR):
+            files_dir = os.path.join(INSTANCES_DIR, entry, "MQL5", "Files")
+            out_file = os.path.join(files_dir, "ares_sync_out.json")
+            if not os.path.exists(out_file):
+                continue
+
+            reading_file = os.path.join(files_dir, "ares_sync_out.reading")
+            try:
+                os.replace(out_file, reading_file)
+                with open(reading_file, "r", encoding="utf-8", errors="ignore") as f:
+                    payload = json.load(f)
+            except Exception:
+                continue
+            finally:
+                if os.path.exists(reading_file):
+                    try:
+                        os.remove(reading_file)
+                    except Exception:
+                        pass
+
+            if not isinstance(payload, dict):
+                continue
+            login_str = str(payload.get("login", "")).strip()
+            if login_str in ("", "0"):
+                continue
+
+            try:
+                resp = requests.post(sync_url, json=payload, timeout=3.0)
+                if resp.status_code == 200:
+                    resp_data = resp.json()
+                    new_orders = resp_data.get("orders", [])
+                    if isinstance(new_orders, list) and new_orders:
+                        in_file = os.path.join(files_dir, "ares_sync_in.json")
+                        in_tmp = os.path.join(files_dir, "ares_sync_in.tmp")
+                        merged_orders: List[Dict[str, Any]] = []
+                        if os.path.exists(in_file):
+                            try:
+                                with open(in_file, "r", encoding="utf-8") as f:
+                                    prev = json.load(f)
+                                    if isinstance(prev.get("orders"), list):
+                                        merged_orders.extend(prev["orders"])
+                            except Exception:
+                                pass
+                        merged_orders.extend(new_orders)
+                        with open(in_tmp, "w", encoding="utf-8") as f:
+                            json.dump({"status": "SYNCED", "orders": merged_orders}, f, ensure_ascii=False, separators=(",", ":"))
+                        os.replace(in_tmp, in_file)
+            except Exception:
+                pass
+
+    def run_file_bridge_loop(self):
+        while True:
+            try:
+                self.process_local_file_bridges()
+            except Exception:
+                pass
+            time.sleep(1.0)
+
     def sync_all_user_instances(self):
         """رصد دائم، توقف اکانت‌های قطع‌شده، تشخیص تغییر اکسپرت/رمز و اجرای نوبتی جهت حفظ CPU"""
         self.ensure_base_ea_compiled()
@@ -417,7 +558,6 @@ Period=M15
             if str(u.get("mt5_login", "")).strip() and str(u.get("mt5_pass", "")).strip()
         }
 
-        # ۱. توقف متاتریدر اکانت‌هایی که قطع ارتباط زده‌اند یا از دیتابیس تغییر یافته‌اند
         if os.path.exists(INSTANCES_DIR):
             for entry in os.listdir(INSTANCES_DIR):
                 entry_path = os.path.join(INSTANCES_DIR, entry)
@@ -426,7 +566,6 @@ Period=M15
                         print(f"🛑 [ARES CLOUD MANAGER]: توقف متاتریدر اکانت قطع‌شده ({entry})...", flush=True)
                         self.stop_login_instance(entry)
 
-        # ۲. بررسی و اجرای نوبتی اکانت‌های فعال (حداکثر ۱ استارت در هر چرخه برای جلوگیری از قفل CPU)
         for user in accounts:
             login = str(user.get("mt5_login", "")).strip()
             password = str(user.get("mt5_pass", "")).strip()
@@ -455,8 +594,11 @@ Period=M15
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.9 - مدیریت بهینه CPU، توقف خودکار و عدم بازگشت بیلد) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.0 - سرورهای آرون‌مارکتس، پل ابری ضد ۴۰۱۴ و ایزوله‌سازی کامل) فعال شد.", flush=True)
         print("=" * 80, flush=True)
+
+        bridge_thread = threading.Thread(target=self.run_file_bridge_loop, daemon=True)
+        bridge_thread.start()
 
         while True:
             try:

@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V14.4 |
-//|  ACTIVE SYMBOLS SYNC, INDEX ALIAS RESOLUTION & EXACT 1:1.5 R:R   |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V14.5 |
+//|  ACTIVE SYMBOLS, INDEX ALIASES, 1:1.5 R:R & CLOUD FILE FALLBACK  |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.40"
+#property version   "14.50"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.4 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
+   Print("🚀 ARES Bridge V14.5 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
 }
@@ -564,13 +564,62 @@ void ExecuteSingleOrderJson(string orderObj)
 }
 
 //+------------------------------------------------------------------+
+//| پل ارتباطی محلی فایل برای سرورهای ابری بدون نیاز به WebRequest   |
+//+------------------------------------------------------------------+
+void SyncViaLocalFileBridge(const char &postData[])
+{
+   int outSize = ArraySize(postData);
+   if(outSize > 0)
+   {
+      int hOut = FileOpen("ares_sync_out.tmp", FILE_WRITE | FILE_BIN);
+      if(hOut != INVALID_HANDLE)
+      {
+         FileWriteArray(hOut, postData, 0, outSize);
+         FileClose(hOut);
+         FileMove("ares_sync_out.tmp", 0, "ares_sync_out.json", FILE_REWRITE);
+      }
+   }
+
+   if(FileIsExist("ares_sync_in.json", 0))
+   {
+      if(FileMove("ares_sync_in.json", 0, "ares_sync_proc.json", FILE_REWRITE))
+      {
+         int hIn = FileOpen("ares_sync_proc.json", FILE_READ | FILE_BIN);
+         if(hIn != INVALID_HANDLE)
+         {
+            int sz = (int)FileSize(hIn);
+            if(sz > 0)
+            {
+               uchar buf[];
+               ArrayResize(buf, sz);
+               uint readBytes = FileReadArray(hIn, buf, 0, sz);
+               FileClose(hIn);
+               if(readBytes > 0)
+               {
+                  string resp = CharArrayToString(buf, 0, (int)readBytes, CP_UTF8);
+                  ProcessServerOrders(resp);
+               }
+            }
+            else
+            {
+               FileClose(hIn);
+            }
+         }
+         FileDelete("ares_sync_proc.json", 0);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| ارسال وضعیت زنده حساب، سود واقعی، پوزیشن‌ها و نمادها به سرور    |
 //+------------------------------------------------------------------+
 void SyncAccountWithServer()
 {
    static int lastWebErr = 0;
 
-   long   login   = AccountInfoInteger(ACCOUNT_LOGIN);
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   if(login <= 0) return;
+
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
    string company = AccountInfoString(ACCOUNT_COMPANY);
@@ -614,7 +663,11 @@ void SyncAccountWithServer()
       if(err != lastWebErr)
       {
          lastWebErr = err;
-         Print("⚠️ [ARES Sync Error] HTTP=", res, " LastError=", err);
+         Print("⚠️ [ARES Sync Error] HTTP=", res, " LastError=", err, (err == 4014 ? " -> Using Cloud File Bridge" : ""));
+      }
+      if(err == 4014)
+      {
+         SyncViaLocalFileBridge(postData);
       }
    }
 }
