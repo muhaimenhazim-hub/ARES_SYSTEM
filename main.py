@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 14.4 (PER-BROKER EQUITY ISOLATION, REAL BINANCE SYNC & 1:1.5 R:R)
+VERSION: 14.5 (TRADABLE SYMBOL GATE, INDEX DUPLICATE GUARD & 0.50 LOT CAP SYNC)
 ================================================================================
 """
 
@@ -30,11 +30,11 @@ from market_data_connector import AresUnifiedDataService
 
 class AresMasterSystem:
     SYMBOLS_SPECS = {
-        # فارکس، انس طلا و شاخص‌ها (مخصوص متاتریدر ۵ با سقف حجم ایمن)
+        # فارکس، انس طلا و شاخص‌ها (مخصوص متاتریدر ۵ با سقف حجم ایمن هماهنگ با اکسپرت)
         "XAUUSD": ContractSpecs("XAUUSD", min_volume=0.01, max_volume=0.30, volume_step=0.01, tick_size=0.01, contract_size=100.0, min_notional_usd=1.0, leverage=100.0),
         "EURUSD": ContractSpecs("EURUSD", min_volume=0.01, max_volume=0.50, volume_step=0.01, tick_size=0.00001, contract_size=100000.0, min_notional_usd=1.0, leverage=100.0),
-        "NASDAQ 100": ContractSpecs("NASDAQ 100", min_volume=0.01, max_volume=1.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
-        "S&P 500": ContractSpecs("S&P 500", min_volume=0.01, max_volume=1.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
+        "NASDAQ 100": ContractSpecs("NASDAQ 100", min_volume=0.01, max_volume=0.50, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
+        "S&P 500": ContractSpecs("S&P 500", min_volume=0.01, max_volume=0.50, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
         # کریپتو فیوچرز (فقط در صورت اتصال API بایننس)
         "BTCUSDT": ContractSpecs("BTCUSDT", min_volume=0.001, max_volume=5.0, volume_step=0.001, tick_size=0.1, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
         "ETHUSDT": ContractSpecs("ETHUSDT", min_volume=0.01, max_volume=20.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
@@ -46,7 +46,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۴ - همگام‌سازی واقعی بایننس/متاتریدر و نسبت ۱:۱.۵)")
+        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۵ - فیلتر نمادهای قابل معامله و همگام‌سازی کامل با اکسپرت)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -131,6 +131,39 @@ class AresMasterSystem:
             vol = specs.max_volume
         return vol
 
+    @staticmethod
+    def _is_symbol_already_open(
+        canonical_symbol: str,
+        user_cfg: Dict[str, Any],
+        current_active: List[Dict[str, Any]],
+    ) -> bool:
+        """بررسی دقیق باز بودن معامله روی نماد (با پشتیبانی از نام‌های متفاوت بروکر مثل NDXUSD. و USTEC)"""
+        candidates = {canonical_symbol.replace(" ", "").rstrip(".").upper()}
+        resolved = account_config.resolve_broker_symbol(canonical_symbol, user_cfg)
+        if resolved:
+            candidates.add(resolved.replace(" ", "").rstrip(".").upper())
+        aliases = account_config.BROKER_SYMBOL_ALIASES.get(canonical_symbol, [canonical_symbol])
+        for alias in aliases:
+            candidates.add(alias.replace(" ", "").rstrip(".").upper())
+
+        for t in current_active:
+            t_sym = str(t.get("symbol", "")).replace(" ", "").rstrip(".").upper()
+            if not t_sym:
+                continue
+            if t_sym in candidates:
+                return True
+            for alias in aliases:
+                a_clean = alias.rstrip(".").upper()
+                if len(a_clean) >= 5 and t_sym.startswith(a_clean):
+                    return True
+                if a_clean in ("NDX", "SPX") and (
+                    t_sym.startswith(f"{a_clean}USD")
+                    or t_sym.startswith(f"{a_clean}500")
+                    or t_sym.startswith(f"{a_clean}100")
+                ):
+                    return True
+        return False
+
     def scan_for_opportunities(self):
         """اسکن بازار و ارسال سفارش با رعایت سقف ۳ معامله، تفکیک موجودی بروکرها و نسبت دقیق 1:1.5"""
         active_users = self.db.get_auto_trading_users()
@@ -185,6 +218,9 @@ class AresMasterSystem:
                 if not is_crypto and not is_mt5_connected:
                     continue
 
+                if not is_crypto and not account_config.is_symbol_tradable_for_user(symbol, user):
+                    continue
+
                 current_active = self.db.get_user_open_trades(user_id=user_id)
                 current_pending = account_config.get_user_pending_commands_count(target_keys)
                 if (len(current_active) + current_pending) >= 3:
@@ -197,8 +233,8 @@ class AresMasterSystem:
                 if lock_key in self.pending_trade_locks:
                     continue
 
-                # ۳. بررسی وجود پوزیشن باز در دیتابیس
-                if any(t["symbol"].replace(" ", "").rstrip(".") == clean_sym for t in current_active):
+                # ۳. بررسی وجود پوزیشن باز در دیتابیس (با احتساب تمام نام‌های معادل بروکر)
+                if self._is_symbol_already_open(symbol, user, current_active):
                     continue
 
                 # ۴. بررسی وجود سفارش برای این نماد در صف متاتریدر
@@ -245,8 +281,8 @@ class AresMasterSystem:
                         vol = self._round_volume_to_step(risk_decision.calculated_volume, specs)
 
                         # محاسبه دقیق فواصل SL و TP برای تضمین ۱۰۰٪ نسبت 1:1.5 روی قیمت واقعی صرافی/بروکر
-                        sl_dist = round(abs(opportunity.entry_price - opportunity.stop_loss), 5)
-                        tp_dist = round(sl_dist * 1.5, 5)
+                        sl_dist = round(abs(opportunity.entry_price - opportunity.stop_loss), 6)
+                        tp_dist = round(sl_dist * 1.5, 6)
 
                         if is_crypto and is_binance_connected:
                             res = account_config.execute_binance_order_detailed(
