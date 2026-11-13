@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.5 (STALE BRIDGE GUARD, CLEAN CACHE PURGE, BINANCE TTL & INDEX ALIASES)
+VERSION: 14.6 (VERIFIED TRADABLE SYMBOLS CHECK, STALE GUARD & BINANCE TTL)
 ================================================================================
 """
 
@@ -165,6 +165,29 @@ def get_user_bridge_snapshot(user_cfg: Dict[str, Any], allow_stale: bool = False
                 return snap
 
     return None
+
+
+def is_symbol_tradable_for_user(canonical_symbol: str, user_cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """بررسی اینکه آیا نماد در لیست نمادهای واقعی و قابل معامله بروکر کاربر فعال است یا خیر"""
+    if not user_cfg:
+        return True
+    bridge = get_user_bridge_snapshot(user_cfg, allow_stale=True)
+    if not bridge or not bridge.get("verified_symbols"):
+        return True
+    active_syms = bridge.get("active_symbols")
+    if not isinstance(active_syms, list):
+        return True
+
+    clean_sym = canonical_symbol.strip()
+    aliases = BROKER_SYMBOL_ALIASES.get(clean_sym, [clean_sym])
+    for alias in aliases:
+        alias_upper = alias.upper()
+        alias_clean = alias.rstrip(".").upper()
+        for s in active_syms:
+            su = str(s).strip().upper()
+            if su == alias_upper or (len(alias_clean) >= 3 and su.startswith(alias_clean)):
+                return True
+    return False
 
 
 def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, Any]] = None) -> str:

@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V14.5 |
-//|  ACTIVE SYMBOLS, INDEX ALIASES, 1:1.5 R:R & CLOUD FILE FALLBACK  |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V14.6 |
+//|  VERIFIED TRADABLE SYMBOLS, TRADE-MODE GATE & CLOUD FILE BRIDGE  |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.50"
+#property version   "14.60"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.5 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
+   Print("🚀 ARES Bridge V14.6 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
 }
@@ -55,7 +55,7 @@ bool TryActivateSymbol(string sym)
    if(!SymbolSelect(sym, true)) return false;
 
    long tradeMode = SymbolInfoInteger(sym, SYMBOL_TRADE_MODE);
-   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED) return false;
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED || tradeMode == SYMBOL_TRADE_MODE_CLOSEONLY) return false;
 
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
    if(bid <= 0.0)
@@ -188,34 +188,46 @@ string ResolveBrokerSymbol(string rawSymbol)
 }
 
 //+------------------------------------------------------------------+
-//| ساخت لیست نمادهای واقعی بروکر جهت ارسال به سرور ARES             |
+//| ساخت لیست نمادهای واقعاً قابل معامله بروکر جهت ارسال به سرور     |
 //+------------------------------------------------------------------+
 string BuildActiveSymbolsJson()
 {
+   static string cachedJson = "[]";
+   static datetime lastScanTime = 0;
+   datetime now = TimeLocal();
+   if(lastScanTime != 0 && (now - lastScanTime) < 60 && cachedJson != "[]")
+      return cachedJson;
+
    string json = "[";
    int total = SymbolsTotal(false);
    int added = 0;
 
-   for(int i = 0; i < total && added < 60; i++)
+   for(int i = 0; i < total && added < 40; i++)
    {
       string symName = SymbolName(i, false);
+      if(StringLen(symName) > 14) continue;
+
       string upper = symName;
       StringToUpper(upper);
 
+      bool isGoldAlias = (upper == "GOLD" || upper == "GOLD." || upper == "GOLDM" || StringFind(upper, "GOLD.") == 0);
       bool relevant = (
-         StringFind(upper, "EURUSD") >= 0 ||
-         StringFind(upper, "XAU") >= 0 ||
-         StringFind(upper, "GOLD") >= 0 ||
-         StringFind(upper, "NAS") >= 0 ||
-         StringFind(upper, "USTEC") >= 0 ||
-         StringFind(upper, "US100") >= 0 ||
-         StringFind(upper, "NDX") >= 0 ||
-         StringFind(upper, "US500") >= 0 ||
-         StringFind(upper, "SP500") >= 0 ||
-         StringFind(upper, "SPX") >= 0
+         StringFind(upper, "EURUSD") == 0 ||
+         StringFind(upper, "XAUUSD") == 0 ||
+         isGoldAlias ||
+         StringFind(upper, "NAS100") == 0 ||
+         StringFind(upper, "USTEC") == 0 ||
+         StringFind(upper, "US100") == 0 ||
+         StringFind(upper, "NDX") == 0 ||
+         StringFind(upper, "US500") == 0 ||
+         StringFind(upper, "SP500") == 0 ||
+         StringFind(upper, "SPX") == 0
       );
 
       if(!relevant) continue;
+      if(!SymbolSelect(symName, true)) continue;
+      if(SymbolInfoInteger(symName, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_FULL) continue;
+      if(SymbolInfoDouble(symName, SYMBOL_BID) <= 0.0) continue;
 
       StringReplace(symName, "\"", "");
       if(added > 0) json += ",";
@@ -224,7 +236,9 @@ string BuildActiveSymbolsJson()
    }
 
    json += "]";
-   return json;
+   cachedJson = json;
+   lastScanTime = now;
+   return cachedJson;
 }
 
 //+------------------------------------------------------------------+
@@ -394,6 +408,17 @@ void ExecuteSingleOrderJson(string orderObj)
 
    if(action == "BUY" || action == "SELL")
    {
+      // --- سد دفاعی ۰: بررسی فعال بودن معامله نماد در بروکر ---
+      bool symReady = TryActivateSymbol(sym);
+      long tradeMode = SymbolInfoInteger(sym, SYMBOL_TRADE_MODE);
+      if(!symReady || tradeMode == SYMBOL_TRADE_MODE_DISABLED || tradeMode == SYMBOL_TRADE_MODE_CLOSEONLY ||
+         (action == "BUY" && tradeMode == SYMBOL_TRADE_MODE_SHORTONLY) ||
+         (action == "SELL" && tradeMode == SYMBOL_TRADE_MODE_LONGONLY))
+      {
+         Print("🛑 [ARES EA GATE]: نماد ", sym, " (raw:", rawSymbol, ") در این بروکر غیرفعال است (TradeMode=", tradeMode, ")؛ سفارش لغو شد.");
+         return;
+      }
+
       // --- سد دفاعی ۱: بررسی سقف قطعی حداکثر ۳ معامله باز در بروکر ---
       if(PositionsTotal() >= InpMaxOpenPositions)
       {
@@ -637,7 +662,7 @@ void SyncAccountWithServer()
    string ident = (InpUserIdentifier != "") ? InpUserIdentifier : IntegerToString(login);
 
    string payload = StringFormat(
-      "{\"identifier\":\"%s\",\"login\":%I64d,\"balance\":%.2f,\"equity\":%.2f,\"history_pnl\":%.2f,\"floating_pnl\":%.2f,\"initial_deposit\":%.2f,\"broker\":\"%s\",\"server\":\"%s\",\"open_positions\":%s,\"active_symbols\":%s}",
+      "{\"identifier\":\"%s\",\"login\":%I64d,\"balance\":%.2f,\"equity\":%.2f,\"history_pnl\":%.2f,\"floating_pnl\":%.2f,\"initial_deposit\":%.2f,\"broker\":\"%s\",\"server\":\"%s\",\"verified_symbols\":true,\"open_positions\":%s,\"active_symbols\":%s}",
       ident, login, balance, equity, historyPnL, floatingPnL, initialDeposit, company, server, openPosJson, activeSymsJson
    );
 
