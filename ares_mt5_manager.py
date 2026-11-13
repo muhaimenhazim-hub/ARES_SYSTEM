@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 14.7 (ISOLATED BINARIES, AUTO-COMPILE, AUTO-CHART EA & CREDENTIAL SYNC)
+VERSION: 14.8 (EXACT MT5 CHART EA FORMAT, ISOLATED BINARIES & AUTO-COMPILE)
 ================================================================================
 """
 
@@ -34,7 +34,7 @@ UNIVERSAL_BROKER_MAP = {
 class AresMT5MultiManager:
     """
     ناظر خودکار متاتریدر ۵ با پشتیبانی از تمامی بروکرهای معتبر جهان،
-    دسکتاپ مجازی ایزوله Wine، کامپایل خودکار اکسپرت و تزریق مستقیم چارت فعال.
+    دسکتاپ مجازی ایزوله Wine، کامپایل خودکار اکسپرت و تزریق دقیق چارت فعال.
     """
 
     def __init__(self, db: Optional[AresDatabaseManager] = None):
@@ -163,7 +163,7 @@ class AresMT5MultiManager:
 
     @staticmethod
     def _ensure_default_chart_with_ea(user_dir: str, symbol: str, user_identifier: str):
-        """ساخت خودکار چارت پیش‌فرض همراه با اکسپرت متصل‌شده AresBridgeEA"""
+        """ساخت چارت پیش‌فرض با فرمت دقیق متاتریدر شامل path و expertmode=1"""
         charts_default_dir = os.path.join(user_dir, "MQL5", "Profiles", "Charts", "Default")
         os.makedirs(charts_default_dir, exist_ok=True)
         chart_path = os.path.join(charts_default_dir, "chart01.chr")
@@ -173,7 +173,11 @@ class AresMT5MultiManager:
             try:
                 raw = open(chart_path, "rb").read()
                 txt = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in raw[:100] else "utf-8", errors="ignore")
-                if "AresBridgeEA" in txt and f"symbol={symbol}" in txt:
+                if (
+                    "path=Experts\\AresBridgeEA.ex5" in txt
+                    and "expertmode=1" in txt
+                    and f"symbol={symbol}" in txt
+                ):
                     needs_write = False
             except Exception:
                 pass
@@ -200,25 +204,25 @@ background_color=0
 foreground_color=16777215
 barup_color=65280
 bardown_color=65280
-<window>
-height=100.000000
-<indicator>
-name=Main
-</indicator>
-</window>
 <expert>
 name=AresBridgeEA
-flags=339
-window_num=0
+path=Experts\\AresBridgeEA.ex5
+expertmode=1
 <inputs>
 InpServerURL=http://141.98.166.81/api/bridge/sync
 InpUserIdentifier={user_identifier}
 InpSyncSeconds=2
 InpSlippagePoints=50
 InpMaxOpenPositions=3
-InpMaxLotCap=0.50
+InpMaxLotCap=0.5
 </inputs>
 </expert>
+<window>
+height=100.000000
+<indicator>
+name=Main
+</indicator>
+</window>
 </chart>
 """
         try:
@@ -250,6 +254,15 @@ InpMaxLotCap=0.50
         os.makedirs(config_dir, exist_ok=True)
         os.makedirs(experts_dir, exist_ok=True)
 
+        # حذف لینک قدیمی پوشه Profiles در صورت وجود تا پروفایل اختصاصی کاربر اجرا شود
+        for old_prof in ["Profiles", "profiles"]:
+            old_prof_path = os.path.join(user_dir, old_prof)
+            if os.path.islink(old_prof_path):
+                try:
+                    os.unlink(old_prof_path)
+                except Exception:
+                    pass
+
         # ۱. کپی ایزوله فایل‌های اجرایی متاتریدر (بدون هاردلینک جهت جلوگیری از قفل Error 32)
         if os.path.exists(BASE_MT5_DIR):
             for fname in os.listdir(BASE_MT5_DIR):
@@ -269,7 +282,7 @@ InpMaxLotCap=0.50
                     except Exception:
                         pass
 
-            for folder in ["Profiles", "profiles", "Templates", "templates", "Help", "help", "Sounds", "sounds", "Bases", "bases"]:
+            for folder in ["Templates", "templates", "Help", "help", "Sounds", "sounds", "Bases", "bases"]:
                 src_f = os.path.join(BASE_MT5_DIR, folder)
                 dst_f = os.path.join(user_dir, folder)
                 if os.path.exists(src_f) and not os.path.exists(dst_f):
@@ -413,7 +426,7 @@ Period=M15
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.7 - ایزوله‌سازی کامل و اتصال خودکار اکسپرت) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V14.8 - فرمت دقیق چارت اکسپرت) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         while True:
