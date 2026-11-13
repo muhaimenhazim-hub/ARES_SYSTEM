@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 14.2 (MULTI-TENANT SUPPORT, PERSISTENT REAL TRADES, ZERO GHOST TRADES)
+VERSION: 14.3 (MULTI-TENANT SUPPORT, MT5 + BINANCE LIVE SYNC, ZERO GHOST TRADES)
 ================================================================================
 """
 
@@ -174,7 +174,7 @@ class AresDatabaseManager:
             cursor = conn.cursor()
             if clean_login:
                 cursor.execute("""
-                    SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_server 
+                    SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_server
                     FROM user_broker_configs c
                     JOIN users u ON c.user_id = u.user_id
                     WHERE c.mt5_login = ?;
@@ -184,7 +184,7 @@ class AresDatabaseManager:
                     return dict(row)
             if clean_id:
                 cursor.execute("""
-                    SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_server 
+                    SELECT u.user_id, u.identifier, c.mt5_login, c.mt5_server
                     FROM users u
                     LEFT JOIN user_broker_configs c ON u.user_id = c.user_id
                     WHERE u.identifier = ? OR u.user_id = ?;
@@ -198,7 +198,7 @@ class AresDatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT c.*, u.identifier 
+                SELECT c.*, u.identifier
                 FROM user_broker_configs c
                 JOIN users u ON c.user_id = u.user_id
                 WHERE c.user_id = ?;
@@ -265,8 +265,8 @@ class AresDatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                UPDATE user_broker_configs 
-                SET binance_api_key = '', binance_secret_key = '', mt5_login = '', mt5_pass = '', mt5_server = '', is_auto_trading = 0 
+                UPDATE user_broker_configs
+                SET binance_api_key = '', binance_secret_key = '', mt5_login = '', mt5_pass = '', mt5_server = '', is_auto_trading = 0
                 WHERE user_id = ?;
             """, (user_id,))
 
@@ -274,7 +274,7 @@ class AresDatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT u.user_id, u.identifier, c.is_auto_trading, c.trading_mode, 
+                SELECT u.user_id, u.identifier, c.is_auto_trading, c.trading_mode,
                        c.mt5_login, c.mt5_pass, c.mt5_server,
                        c.binance_api_key, c.binance_secret_key
                 FROM user_broker_configs c
@@ -299,11 +299,10 @@ class AresDatabaseManager:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    DELETE FROM trades 
-                    WHERE trade_id LIKE 'POS_%' 
-                       OR trade_id LIKE 'TEST%' 
+                    DELETE FROM trades
+                    WHERE trade_id LIKE 'TEST%'
                        OR trade_id LIKE 'MOCK%'
-                       OR (market = 'FOREX_OR_INDICES' AND (mt5_ticket IS NULL OR mt5_ticket <= 0));
+                       OR (market = 'FOREX_OR_INDICES' AND (trade_id LIKE 'POS_%' OR mt5_ticket IS NULL OR mt5_ticket <= 0));
                 """)
         except Exception:
             pass
@@ -333,7 +332,7 @@ class AresDatabaseManager:
                 row = cursor.fetchone()
                 if row:
                     cursor.execute("""
-                        UPDATE trades 
+                        UPDATE trades
                         SET current_volume = ?, stop_loss = ?, tp1 = ?, realized_pnl = ?, status = 'OPEN'
                         WHERE trade_id = ?;
                     """, (vol, sl, tp, profit, row["trade_id"]))
@@ -356,6 +355,62 @@ class AresDatabaseManager:
                         WHERE trade_id = ?;
                     """, (now, row["trade_id"]))
 
+    def sync_binance_live_positions(self, user_id: str, binance_positions: Optional[List[Dict[str, Any]]]) -> List[str]:
+        """همگام‌سازی لحظه‌ای پوزیشن‌های واقعی بایننس فیوچرز با دیتابیس (بستن خودکار در صورت برخورد SL/TP روی صرافی)"""
+        if binance_positions is None:
+            return []
+        now = datetime.now(timezone.utc).isoformat()
+        closed_trade_ids: List[str] = []
+
+        live_by_sym: Dict[str, Dict[str, Any]] = {}
+        for p in binance_positions:
+            sym_clean = str(p.get("symbol", "")).replace("/", "").replace(":USDT", "").upper()
+            if sym_clean:
+                live_by_sym[sym_clean] = p
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT trade_id, symbol FROM trades
+                WHERE user_id = ? AND status = 'OPEN' AND market = 'CRYPTO_FUTURES';
+            """, (user_id,))
+            open_rows = cursor.fetchall()
+            tracked_syms = set()
+
+            for row in open_rows:
+                sym_clean = str(row["symbol"]).replace("/", "").replace(":USDT", "").upper()
+                tracked_syms.add(sym_clean)
+                if sym_clean in live_by_sym:
+                    p = live_by_sym[sym_clean]
+                    cursor.execute("""
+                        UPDATE trades
+                        SET current_volume = ?, realized_pnl = ?, status = 'OPEN'
+                        WHERE trade_id = ?;
+                    """, (float(p.get("volume", 0.0)), float(p.get("unrealized_pnl", 0.0)), row["trade_id"]))
+                else:
+                    cursor.execute("""
+                        UPDATE trades SET status = 'CLOSED', closed_at = ?, exit_reason = 'BINANCE_CLOSED'
+                        WHERE trade_id = ?;
+                    """, (now, row["trade_id"]))
+                    closed_trade_ids.append(row["trade_id"])
+
+            # ثبت پوزیشن باز روی بایننس در صورتی که قبلاً در دیتابیس نبود
+            for sym_clean, p in live_by_sym.items():
+                if sym_clean not in tracked_syms:
+                    trade_id = f"BIN_SYNC_{sym_clean}_{int(datetime.now(timezone.utc).timestamp())}"
+                    entry_p = float(p.get("entry_price", 0.0))
+                    vol = float(p.get("volume", 0.0))
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO trades (
+                            trade_id, user_id, mt5_ticket, symbol, market, side, entry_price,
+                            initial_volume, current_volume, stop_loss, initial_stop_loss,
+                            tp1, tp2, tp3, risk_amount_usd, realized_pnl, total_fees,
+                            is_break_even, status, opened_at
+                        ) VALUES (?, ?, 0, ?, 'CRYPTO_FUTURES', ?, ?, ?, ?, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?, 0.0, 0, 'OPEN', ?);
+                    """, (trade_id, user_id, sym_clean, p.get("side", "BUY"), entry_p, vol, vol, float(p.get("unrealized_pnl", 0.0)), now))
+
+        return closed_trade_ids
+
     def get_user_open_trades(self, user_id: str) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -363,11 +418,13 @@ class AresDatabaseManager:
                 SELECT trade_id, user_id, symbol, market, side, entry_price, stop_loss, initial_stop_loss,
                        initial_volume, current_volume, tp1, tp2, tp3, risk_amount_usd,
                        realized_pnl, total_fees, is_break_even, status, mt5_ticket, opened_at
-                FROM trades 
-                WHERE user_id = ? 
+                FROM trades
+                WHERE user_id = ?
                   AND status = 'OPEN'
-                  AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES')
-                  AND trade_id NOT LIKE 'POS_%'
+                  AND (
+                      (mt5_ticket > 0 AND trade_id NOT LIKE 'POS_%')
+                      OR (market = 'CRYPTO_FUTURES' AND trade_id NOT LIKE 'TEST%' AND trade_id NOT LIKE 'MOCK%')
+                  )
                 ORDER BY opened_at DESC;
             """, (user_id,))
             return [dict(r) for r in cursor.fetchall()]
@@ -376,10 +433,12 @@ class AresDatabaseManager:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT * FROM trades 
-                WHERE status = 'OPEN' 
-                  AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES')
-                  AND trade_id NOT LIKE 'POS_%';
+                SELECT * FROM trades
+                WHERE status = 'OPEN'
+                  AND (
+                      (mt5_ticket > 0 AND trade_id NOT LIKE 'POS_%')
+                      OR (market = 'CRYPTO_FUTURES' AND trade_id NOT LIKE 'TEST%' AND trade_id NOT LIKE 'MOCK%')
+                  );
             """)
             return [dict(r) for r in cursor.fetchall()]
 
@@ -473,14 +532,14 @@ class AresDatabaseManager:
 
             if user_id:
                 cursor.execute("""
-                    SELECT COUNT(*) FROM trades 
+                    SELECT COUNT(*) FROM trades
                     WHERE user_id = ? AND status = 'OPEN' AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES');
                 """, (user_id,))
                 open_trades = cursor.fetchone()[0]
 
                 cursor.execute("""
-                    SELECT SUM(realized_pnl), SUM(total_fees) 
-                    FROM trades 
+                    SELECT SUM(realized_pnl), SUM(total_fees)
+                    FROM trades
                     WHERE user_id = ? AND status = 'CLOSED' AND (mt5_ticket > 0 OR market = 'CRYPTO_FUTURES');
                 """, (user_id,))
                 row = cursor.fetchone()

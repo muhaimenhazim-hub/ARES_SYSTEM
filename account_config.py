@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.3 (STRICT QUEUE DEDUPLICATION, AUTO-EXPIRING TTL & FULL KEY SYNC)
+VERSION: 14.4 (QUEUE DEDUP, BINANCE REAL SL/TP ORDERS & LIVE POSITION SYNC)
 ================================================================================
 """
 
@@ -178,8 +178,7 @@ def is_symbol_in_pending_queue(target_keys: List[str], symbol: str) -> bool:
 
 def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg: Optional[Dict[str, Any]] = None) -> bool:
     """
-    ثبت دستور معاملاتی با اعمال فیلتر سخت‌گیرانه ضدتکرار (Anti-Duplication)
-    و سقف‌گذاری قطعی حداکثر ۳ سفارش در صف
+    ثبت دستور معاملاتی با اعمال فیلتر سخت‌گیرانه ضدتکرار (Anti-Duplication) و سقف‌گذاری قطعی حداکثر ۳ سفارش در صف
     """
     all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
     if modified:
@@ -312,26 +311,238 @@ def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, 
     return 0.0, "حساب معاملاتی متصل نیست", "از دکمه «تنظیمات حساب» اطلاعات متاتریدر ۵ یا بایننس خود را وارد کنید.", False
 
 
-def execute_binance_order(user_cfg: Dict[str, Any], symbol: str, side: str, volume: float, stop_loss: float = 0.0, take_profit: float = 0.0) -> Tuple[bool, str]:
+def _create_binance_exchange(user_cfg: Dict[str, Any]):
     b_key = str(user_cfg.get("binance_api_key", "")).strip()
     b_secret = str(user_cfg.get("binance_secret_key", "")).strip()
     if not b_key or not b_secret:
-        return False, "No Binance API keys"
+        return None
+    import ccxt
+    return ccxt.binanceusdm({
+        "apiKey": b_key,
+        "secret": b_secret,
+        "enableRateLimit": True,
+        "options": {"defaultType": "future"},
+        "timeout": 10000,
+    })
+
+
+def _format_binance_symbol(symbol: str) -> str:
+    clean = symbol.replace("/", "").replace(":USDT", "").replace("USDT", "").strip().upper()
+    return f"{clean}/USDT:USDT"
+
+
+def execute_binance_order_detailed(
+    user_cfg: Dict[str, Any],
+    symbol: str,
+    side: str,
+    volume: float,
+    stop_loss: float = 0.0,
+    take_profit: float = 0.0,
+    sl_dist: float = 0.0,
+    tp_dist: float = 0.0,
+) -> Dict[str, Any]:
+    """اجرای سفارش بازار بایننس همراه با ثبت واقعی STOP_MARKET (SL) و TAKE_PROFIT_MARKET (TP) با نسبت ۱ به ۱.۵"""
+    exchange = _create_binance_exchange(user_cfg)
+    if exchange is None:
+        return {"success": False, "error": "No Binance API keys"}
+
     try:
-        import ccxt
-        exchange = ccxt.binanceusdm({
-            "apiKey": b_key,
-            "secret": b_secret,
-            "enableRateLimit": True,
-            "options": {"defaultType": "future"},
-        })
-        base = symbol.replace("USDT", "")
-        formatted_symbol = f"{base}/USDT:USDT"
-        order_side = "buy" if side.upper() == "BUY" else "sell"
-        order = exchange.create_market_order(formatted_symbol, order_side, volume)
-        return True, str(order.get("id", "OK"))
+        exchange.load_markets()
+        formatted_symbol = _format_binance_symbol(symbol)
+        is_buy = side.upper() == "BUY"
+        order_side = "buy" if is_buy else "sell"
+        close_side = "sell" if is_buy else "buy"
+
+        exec_vol = float(exchange.amount_to_precision(formatted_symbol, volume))
+        order = exchange.create_market_order(formatted_symbol, order_side, exec_vol)
+        order_id = str(order.get("id", "OK"))
+
+        real_entry = float(order.get("average") or order.get("price") or 0.0)
+        if real_entry <= 0:
+            ticker = exchange.fetch_ticker(formatted_symbol)
+            real_entry = float(ticker.get("last") or 0.0)
+
+        # محاسبه دقیق SL و TP نسبت به قیمت واقعی پرشدن سفارش در بایننس
+        eff_sl_dist = float(sl_dist)
+        if eff_sl_dist <= 0 and stop_loss > 0 and real_entry > 0:
+            eff_sl_dist = abs(real_entry - float(stop_loss))
+
+        eff_tp_dist = float(tp_dist)
+        if eff_tp_dist <= 0 and eff_sl_dist > 0:
+            eff_tp_dist = eff_sl_dist * 1.5
+
+        real_sl = float(stop_loss)
+        real_tp = float(take_profit)
+        if eff_sl_dist > 0 and real_entry > 0:
+            real_sl = (real_entry - eff_sl_dist) if is_buy else (real_entry + eff_sl_dist)
+            real_tp = (real_entry + eff_tp_dist) if is_buy else (real_entry - eff_tp_dist)
+
+        sl_order_id = ""
+        tp_order_id = ""
+
+        if real_sl > 0:
+            try:
+                sl_price = float(exchange.price_to_precision(formatted_symbol, real_sl))
+                sl_res = exchange.create_order(
+                    formatted_symbol,
+                    "STOP_MARKET",
+                    close_side,
+                    exec_vol,
+                    None,
+                    {"stopPrice": sl_price, "reduceOnly": True},
+                )
+                sl_order_id = str(sl_res.get("id", ""))
+                real_sl = sl_price
+            except Exception as sl_err:
+                print(f"⚠️ [هشدار ثبت SL بایننس برای {symbol}]: {sl_err}", flush=True)
+
+        if real_tp > 0:
+            try:
+                tp_price = float(exchange.price_to_precision(formatted_symbol, real_tp))
+                tp_res = exchange.create_order(
+                    formatted_symbol,
+                    "TAKE_PROFIT_MARKET",
+                    close_side,
+                    exec_vol,
+                    None,
+                    {"stopPrice": tp_price, "reduceOnly": True},
+                )
+                tp_order_id = str(tp_res.get("id", ""))
+                real_tp = tp_price
+            except Exception as tp_err:
+                print(f"⚠️ [هشدار ثبت TP بایننس برای {symbol}]: {tp_err}", flush=True)
+
+        return {
+            "success": True,
+            "order_id": order_id,
+            "entry_price": real_entry,
+            "volume": exec_vol,
+            "stop_loss": real_sl,
+            "take_profit": real_tp,
+            "sl_order_id": sl_order_id,
+            "tp_order_id": tp_order_id,
+            "error": "",
+        }
     except Exception as e:
-        return False, str(e)
+        return {"success": False, "error": str(e)}
+
+
+def execute_binance_order(
+    user_cfg: Dict[str, Any],
+    symbol: str,
+    side: str,
+    volume: float,
+    stop_loss: float = 0.0,
+    take_profit: float = 0.0,
+) -> Tuple[bool, str]:
+    res = execute_binance_order_detailed(
+        user_cfg=user_cfg,
+        symbol=symbol,
+        side=side,
+        volume=volume,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+    )
+    if res.get("success"):
+        return True, str(res.get("order_id", "OK"))
+    return False, str(res.get("error", "Unknown error"))
+
+
+def fetch_binance_open_positions(user_cfg: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """دریافت لیست پوزیشن‌های واقعاً باز در بایننس فیوچرز برای همگام‌سازی دیتابیس"""
+    exchange = _create_binance_exchange(user_cfg)
+    if exchange is None:
+        return None
+    try:
+        positions = exchange.fetch_positions()
+        active: List[Dict[str, Any]] = []
+        for p in positions:
+            contracts = float(p.get("contracts") or p.get("info", {}).get("positionAmt") or 0.0)
+            if abs(contracts) <= 0:
+                continue
+            raw_sym = str(p.get("symbol", "")).split(":")[0].replace("/", "")
+            side_str = str(p.get("side", "")).upper()
+            if side_str not in ("BUY", "SELL"):
+                side_str = "BUY" if contracts > 0 else "SELL"
+            active.append({
+                "symbol": raw_sym,
+                "side": side_str,
+                "volume": abs(contracts),
+                "entry_price": float(p.get("entryPrice") or 0.0),
+                "unrealized_pnl": float(p.get("unrealizedPnl") or 0.0),
+            })
+        return active
+    except Exception:
+        return None
+
+
+def update_binance_sl_to_breakeven(
+    user_cfg: Dict[str, Any],
+    symbol: str,
+    side: str,
+    volume: float,
+    new_sl: float,
+) -> bool:
+    """به‌روزرسانی حد ضرر بایننس (مثلاً انتقال به Break-Even)"""
+    exchange = _create_binance_exchange(user_cfg)
+    if exchange is None:
+        return False
+    try:
+        exchange.load_markets()
+        formatted_symbol = _format_binance_symbol(symbol)
+        close_side = "sell" if side.upper() == "BUY" else "buy"
+        open_orders = exchange.fetch_open_orders(formatted_symbol)
+        for o in open_orders:
+            o_type = str(o.get("type", "")).upper()
+            if "STOP" in o_type and "TAKE_PROFIT" not in o_type:
+                try:
+                    exchange.cancel_order(o["id"], formatted_symbol)
+                except Exception:
+                    pass
+        exec_vol = float(exchange.amount_to_precision(formatted_symbol, volume))
+        sl_price = float(exchange.price_to_precision(formatted_symbol, new_sl))
+        exchange.create_order(
+            formatted_symbol,
+            "STOP_MARKET",
+            close_side,
+            exec_vol,
+            None,
+            {"stopPrice": sl_price, "reduceOnly": True},
+        )
+        return True
+    except Exception:
+        return False
+
+
+def close_binance_position(
+    user_cfg: Dict[str, Any],
+    symbol: str,
+    side: str,
+    volume: float,
+) -> bool:
+    """بستن کامل پوزیشن بایننس و پاکسازی سفارش‌های باز SL/TP آن نماد"""
+    exchange = _create_binance_exchange(user_cfg)
+    if exchange is None:
+        return False
+    try:
+        exchange.load_markets()
+        formatted_symbol = _format_binance_symbol(symbol)
+        close_side = "sell" if side.upper() == "BUY" else "buy"
+        try:
+            exchange.cancel_all_orders(formatted_symbol)
+        except Exception:
+            pass
+        exec_vol = float(exchange.amount_to_precision(formatted_symbol, volume))
+        if exec_vol > 0:
+            exchange.create_market_order(
+                formatted_symbol,
+                close_side,
+                exec_vol,
+                params={"reduceOnly": True},
+            )
+        return True
+    except Exception:
+        return False
 
 
 def load_config() -> Dict[str, Any]:

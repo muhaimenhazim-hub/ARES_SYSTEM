@@ -1,20 +1,20 @@
 //+------------------------------------------------------------------+
-//|                                                AresBridgeEA.mq5  |
-//|                        ARES AI TRADING SYSTEM - BRIDGE V14.2     |
-//|          HARD 3-POSITION GATE, ANTI-DUPLICATION & AUTO-SYMBOL    |
+//|                                                 AresBridgeEA.mq5 |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V14.3 |
+//|     EXACT BROKER R:R (sl_dist/tp_dist), 3-POS GATE & AUTO-SYMBOL |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.20"
+#property version   "14.30"
 #property strict
 
 #include <Trade\Trade.mqh>
 
 input string InpServerURL        = "http://141.98.166.81/api/bridge/sync"; // آدرس سرور ARES
-input string InpUserIdentifier   = "";                                      // ایمیل یا شماره موبایل ثبت شده در سایت
-input int    InpSyncSeconds      = 2;                                       // فاصله همگام سازی (ثانیه)
-input int    InpSlippagePoints   = 50;                                      // حداکثر لغزش مجاز (پوینت)
-input int    InpMaxOpenPositions = 3;                                       // سقف قطعی کل معاملات همزمان
-input double InpMaxLotCap        = 0.50;                                    // سقف قطعی حجم هر معامله (لات)
+input string InpUserIdentifier   = "";    // ایمیل یا شماره موبایل ثبت شده در سایت
+input int    InpSyncSeconds      = 2;     // فاصله همگام سازی (ثانیه)
+input int    InpSlippagePoints   = 50;    // حداکثر لغزش مجاز (پوینت)
+input int    InpMaxOpenPositions = 3;     // سقف قطعی کل معاملات همزمان
+input double InpMaxLotCap        = 0.50;  // سقف قطعی حجم هر معامله (لات)
 
 CTrade ExtTrade;
 
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.2 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
+   Print("🚀 ARES Bridge V14.3 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
 }
@@ -47,14 +47,14 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| تشخیص هوشمند نام دقیق نماد در بروکر (با نقطه یا پسوند)            |
+//| تشخیص هوشمند نام دقیق نماد در بروکر (با نقطه یا پسوند)           |
 //+------------------------------------------------------------------+
 string ResolveBrokerSymbol(string rawSymbol)
 {
    string clean = rawSymbol;
    StringReplace(clean, ".", "");
    StringReplace(clean, " ", "");
-   
+
    // ۱. بررسی نام مستقیم یا همراه با نقطه (مخصوص آرون مارکتس)
    string candidates[6];
    candidates[0] = rawSymbol;
@@ -63,7 +63,7 @@ string ResolveBrokerSymbol(string rawSymbol)
    candidates[3] = clean + "_i";
    candidates[4] = clean + "m";
    candidates[5] = clean + ".a";
-   
+
    for(int i = 0; i < 6; i++)
    {
       if(SymbolSelect(candidates[i], true))
@@ -72,7 +72,7 @@ string ResolveBrokerSymbol(string rawSymbol)
          if(bid > 0) return candidates[i];
       }
    }
-   
+
    // ۲. جستجو در کل نمادهای بروکر
    int total = SymbolsTotal(false);
    for(int i = 0; i < total; i++)
@@ -88,7 +88,7 @@ string ResolveBrokerSymbol(string rawSymbol)
 }
 
 //+------------------------------------------------------------------+
-//| تنظیم خودکار Filling Mode متناسب با بروکر آرون مارکتس             |
+//| تنظیم خودکار Filling Mode متناسب با بروکر                        |
 //+------------------------------------------------------------------+
 void SetSymbolFillingMode(string sym)
 {
@@ -102,28 +102,27 @@ void SetSymbolFillingMode(string sym)
 }
 
 //+------------------------------------------------------------------+
-//| محاسبه سود خالص واقعی از تاریخچه کل معاملات بسته شده در بروکر     |
+//| محاسبه سود خالص واقعی از تاریخچه کل معاملات بسته شده در بروکر    |
 //+------------------------------------------------------------------+
 double CalculateRealHistoryPnL(double &initialDepositOut)
 {
    initialDepositOut = 0.0;
    double netPnL = 0.0;
-   
-   if(!HistorySelect(0, TimeCurrent()))
-      return 0.0;
-      
+
+   if(!HistorySelect(0, TimeCurrent())) return 0.0;
+
    int totalDeals = HistoryDealsTotal();
    for(int i = 0; i < totalDeals; i++)
    {
       ulong dealTicket = HistoryDealGetTicket(i);
       if(dealTicket == 0) continue;
-      
-      long dealType = HistoryDealGetInteger(dealTicket, DEAL_TYPE);
-      double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-      double swap   = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
-      double comm   = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
-      double fee    = HistoryDealGetDouble(dealTicket, DEAL_FEE);
-      
+
+      long   dealType = HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+      double profit   = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+      double swap     = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+      double comm     = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+      double fee      = HistoryDealGetDouble(dealTicket, DEAL_FEE);
+
       if(dealType == DEAL_TYPE_BALANCE)
       {
          if(profit > 0) initialDepositOut += profit;
@@ -137,7 +136,7 @@ double CalculateRealHistoryPnL(double &initialDepositOut)
 }
 
 //+------------------------------------------------------------------+
-//| ساخت آرایه JSON از تمام پوزیشن‌های باز فعلی در متاتریدر           |
+//| ساخت آرایه JSON از تمام پوزیشن‌های باز فعلی در متاتریدر         |
 //+------------------------------------------------------------------+
 string BuildOpenPositionsJson(double &floatingPnLOut)
 {
@@ -145,12 +144,12 @@ string BuildOpenPositionsJson(double &floatingPnLOut)
    string json = "[";
    int total = PositionsTotal();
    bool first = true;
-   
+
    for(int i = 0; i < total; i++)
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
-      
+
       string sym       = PositionGetString(POSITION_SYMBOL);
       long   posType   = PositionGetInteger(POSITION_TYPE);
       string sideStr   = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
@@ -160,12 +159,12 @@ string BuildOpenPositionsJson(double &floatingPnLOut)
       double vol       = PositionGetDouble(POSITION_VOLUME);
       double profit    = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
       int    digits    = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-      
+
       floatingPnLOut += profit;
-      
+
       if(!first) json += ",";
       first = false;
-      
+
       json += StringFormat(
          "{\"ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"entry_price\":%s,\"sl\":%s,\"tp\":%s,\"volume\":%.2f,\"profit\":%.2f}",
          ticket,
@@ -190,16 +189,16 @@ string ExtractJsonVal(string obj, string key)
    string pattern = "\"" + key + "\":";
    int pos = StringFind(obj, pattern);
    if(pos < 0) return "";
-   
+
    int start = pos + StringLen(pattern);
-   while(start < StringLen(obj) && (StringGetCharacter(obj, start) == ' ' || StringGetCharacter(obj, start) == '\"'))
+   while(start < StringLen(obj) && (StringGetCharacter(obj, start) == ' ' || StringGetCharacter(obj, start) == '"'))
       start++;
-      
+
    int end = start;
    while(end < StringLen(obj))
    {
       ushort ch = StringGetCharacter(obj, end);
-      if(ch == '\"' || ch == ',' || ch == '}' || ch == ']') break;
+      if(ch == '"' || ch == ',' || ch == '}' || ch == ']') break;
       end++;
    }
    return StringSubstr(obj, start, end - start);
@@ -212,13 +211,13 @@ void ProcessServerOrders(string response)
 {
    int ordersPos = StringFind(response, "\"orders\":");
    if(ordersPos < 0) return;
-   
+
    int arrStart = StringFind(response, "[", ordersPos);
    int arrEnd   = StringFind(response, "]", arrStart);
    if(arrStart < 0 || arrEnd <= arrStart + 1) return;
-   
+
    string ordersContent = StringSubstr(response, arrStart + 1, arrEnd - arrStart - 1);
-   
+
    int cur = 0;
    while(cur < StringLen(ordersContent))
    {
@@ -226,10 +225,10 @@ void ProcessServerOrders(string response)
       if(objStart < 0) break;
       int objEnd = StringFind(ordersContent, "}", objStart);
       if(objEnd < 0) break;
-      
+
       string orderObj = StringSubstr(ordersContent, objStart, objEnd - objStart + 1);
       ExecuteSingleOrderJson(orderObj);
-      
+
       cur = objEnd + 1;
    }
 }
@@ -244,12 +243,15 @@ void ExecuteSingleOrderJson(string orderObj)
    double volume    = StringToDouble(ExtractJsonVal(orderObj, "volume"));
    double sl        = StringToDouble(ExtractJsonVal(orderObj, "sl"));
    double tp        = StringToDouble(ExtractJsonVal(orderObj, "tp"));
+   double slDist    = StringToDouble(ExtractJsonVal(orderObj, "sl_dist"));
+   double tpDist    = StringToDouble(ExtractJsonVal(orderObj, "tp_dist"));
    ulong  ticket    = (ulong)StringToInteger(ExtractJsonVal(orderObj, "ticket"));
-   
+
    string sym = ResolveBrokerSymbol(rawSymbol);
    SetSymbolFillingMode(sym);
-   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-   
+   int    digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double point  = SymbolInfoDouble(sym, SYMBOL_POINT);
+
    if(action == "BUY" || action == "SELL")
    {
       // --- سد دفاعی ۱: بررسی سقف قطعی حداکثر ۳ معامله باز در بروکر ---
@@ -287,28 +289,98 @@ void ExecuteSingleOrderJson(string orderObj)
       if(step > 0) volume = MathFloor(volume / step) * step;
       if(volume < minVol) volume = minVol;
       if(volume > maxVol) volume = maxVol;
-      
+
       double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
       double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+      double stopsLevel = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * point;
+      double spread     = MathMax(0.0, ask - bid);
+
       double normSL = NormalizeDouble(sl, digits);
       double normTP = NormalizeDouble(tp, digits);
-      
+
+      // --- محاسبه دقیق SL و TP نسبت به قیمت لحظه‌ای واقعی بروکر (تضمین نسبت 1:1.5) ---
+      if(slDist > 0.0)
+      {
+         double minAllowedDist = stopsLevel + spread + (10.0 * point);
+         if(slDist < minAllowedDist)
+            slDist = minAllowedDist;
+
+         double effectiveTpDist = (tpDist > 0.0) ? MathMax(tpDist, slDist * 1.5) : (slDist * 1.5);
+
+         if(action == "BUY")
+         {
+            normSL = NormalizeDouble(ask - slDist, digits);
+            normTP = NormalizeDouble(ask + effectiveTpDist, digits);
+         }
+         else
+         {
+            normSL = NormalizeDouble(bid + slDist, digits);
+            normTP = NormalizeDouble(bid - effectiveTpDist, digits);
+         }
+      }
+
       bool ok = false;
       if(action == "BUY")
       {
          if(normSL >= ask) normSL = 0;
          if(normTP > 0 && normTP <= ask) normTP = 0;
          ok = ExtTrade.Buy(volume, sym, ask, normSL, normTP, "ARES_AI");
-         if(!ok && normSL > 0) ok = ExtTrade.Buy(volume, sym, ask, 0, 0, "ARES_AI");
+         if(!ok && (normSL > 0 || normTP > 0))
+         {
+            ok = ExtTrade.Buy(volume, sym, ask, 0, 0, "ARES_AI");
+            if(ok)
+            {
+               Sleep(200);
+               for(int p = PositionsTotal() - 1; p >= 0; p--)
+               {
+                  ulong pt = PositionGetTicket(p);
+                  if(pt > 0 && PositionGetString(POSITION_SYMBOL) == sym)
+                  {
+                     double openP = PositionGetDouble(POSITION_PRICE_OPEN);
+                     if(slDist > 0.0)
+                     {
+                        double effTp = (tpDist > 0.0) ? MathMax(tpDist, slDist * 1.5) : (slDist * 1.5);
+                        normSL = NormalizeDouble(openP - slDist, digits);
+                        normTP = NormalizeDouble(openP + effTp, digits);
+                     }
+                     ExtTrade.PositionModify(pt, normSL, normTP);
+                     break;
+                  }
+               }
+            }
+         }
       }
       else
       {
          if(normSL > 0 && normSL <= bid) normSL = 0;
          if(normTP >= bid) normTP = 0;
          ok = ExtTrade.Sell(volume, sym, bid, normSL, normTP, "ARES_AI");
-         if(!ok && normSL > 0) ok = ExtTrade.Sell(volume, sym, bid, 0, 0, "ARES_AI");
+         if(!ok && (normSL > 0 || normTP > 0))
+         {
+            ok = ExtTrade.Sell(volume, sym, bid, 0, 0, "ARES_AI");
+            if(ok)
+            {
+               Sleep(200);
+               for(int p = PositionsTotal() - 1; p >= 0; p--)
+               {
+                  ulong pt = PositionGetTicket(p);
+                  if(pt > 0 && PositionGetString(POSITION_SYMBOL) == sym)
+                  {
+                     double openP = PositionGetDouble(POSITION_PRICE_OPEN);
+                     if(slDist > 0.0)
+                     {
+                        double effTp = (tpDist > 0.0) ? MathMax(tpDist, slDist * 1.5) : (slDist * 1.5);
+                        normSL = NormalizeDouble(openP + slDist, digits);
+                        normTP = NormalizeDouble(openP - effTp, digits);
+                     }
+                     ExtTrade.PositionModify(pt, normSL, normTP);
+                     break;
+                  }
+               }
+            }
+         }
       }
-      Print("🔥 Order Executed [", action, " ", sym, " Vol:", volume, "] Result: ", ok, " Retcode: ", ExtTrade.ResultRetcodeDescription());
+      Print("🔥 Order Executed [", action, " ", sym, " Vol:", volume, " SL:", DoubleToString(normSL, digits), " TP:", DoubleToString(normTP, digits), "] Result: ", ok, " Retcode: ", ExtTrade.ResultRetcodeDescription());
    }
    else if(action == "CLOSE")
    {
@@ -343,7 +415,7 @@ void ExecuteSingleOrderJson(string orderObj)
 }
 
 //+------------------------------------------------------------------+
-//| ارسال وضعیت زنده حساب، سود واقعی و پوزیشن‌ها به سرور             |
+//| ارسال وضعیت زنده حساب، سود واقعی و پوزیشن‌ها به سرور            |
 //+------------------------------------------------------------------+
 void SyncAccountWithServer()
 {
@@ -352,30 +424,30 @@ void SyncAccountWithServer()
    double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
    string company = AccountInfoString(ACCOUNT_COMPANY);
    string server  = AccountInfoString(ACCOUNT_SERVER);
-   
+
    StringReplace(company, "\"", "");
    StringReplace(server, "\"", "");
-   
+
    double initialDeposit = 0.0;
    double historyPnL     = CalculateRealHistoryPnL(initialDeposit);
    double floatingPnL    = 0.0;
    string openPosJson    = BuildOpenPositionsJson(floatingPnL);
-   
+
    string ident = (InpUserIdentifier != "") ? InpUserIdentifier : IntegerToString(login);
-   
+
    string payload = StringFormat(
       "{\"identifier\":\"%s\",\"login\":%I64d,\"balance\":%.2f,\"equity\":%.2f,\"history_pnl\":%.2f,\"floating_pnl\":%.2f,\"initial_deposit\":%.2f,\"broker\":\"%s\",\"server\":\"%s\",\"open_positions\":%s}",
       ident, login, balance, equity, historyPnL, floatingPnL, initialDeposit, company, server, openPosJson
    );
-   
+
    char postData[];
    int len = StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8);
    if(len > 0) ArrayResize(postData, len - 1);
-   
-   char resultData[];
+
+   char   resultData[];
    string resultHeaders;
    string headers = "Content-Type: application/json\r\nConnection: keep-alive\r\n";
-   
+
    ResetLastError();
    int res = WebRequest("POST", InpServerURL, headers, 3000, postData, resultData, resultHeaders);
    if(res == 200)
