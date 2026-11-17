@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V14.8 |
-//|  EXACT BROKER RISK SIZING, AUTO 1:1 RISK-FREE & CLOUD BRIDGE     |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V14.9 |
+//|  ORDERCALCPROFIT EXACT SIZING, RISK CLAMP & AUTO 1:1 RISK-FREE   |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.80"
+#property version   "14.90"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.8 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, ", Auto Risk-Free 1:1 ON).");
+   Print("🚀 ARES Bridge V14.9 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, ", OrderCalcProfit + Risk-Free ON).");
    ManageRiskFreePositions();
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
@@ -529,8 +529,10 @@ void ExecuteSingleOrderJson(string orderObj)
 
       double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
       double bid = SymbolInfoDouble(sym, SYMBOL_BID);
-      double stopsLevel = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * point;
-      double spread     = MathMax(0.0, ask - bid);
+      ENUM_ORDER_TYPE oType = (action == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double refPrice       = (action == "BUY") ? ask : bid;
+      double stopsLevel     = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * point;
+      double spread         = MathMax(0.0, ask - bid);
 
       if(slDist > 0.0)
       {
@@ -539,29 +541,44 @@ void ExecuteSingleOrderJson(string orderObj)
             slDist = minAllowedDist;
       }
 
-      // --- محاسبه دقیق حجم متناسب با ریسک دلاری واقعی بر اساس ارزش تیک واقعی همین بروکر ---
-      if(riskUsd > 0.0 && slDist > 0.0)
+      double testSL = (action == "BUY") ? (refPrice - slDist) : (refPrice + slDist);
+
+      // --- محاسبه دقیق حجم متناسب با ریسک دلاری واقعی با OrderCalcProfit (موتور رسمی بروکر) ---
+      if(riskUsd > 0.0 && slDist > 0.0 && refPrice > 0.0)
       {
-         double tickSize = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-         double tickVal  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
-         if(tickSize > 0.0 && tickVal > 0.0)
+         double lossPerLot = 0.0;
+         double profit1Lot = 0.0;
+
+         if(OrderCalcProfit(oType, sym, 1.0, refPrice, testSL, profit1Lot) && MathAbs(profit1Lot) > 0.0)
          {
-            double lossPerLot = (slDist / tickSize) * tickVal;
-            if(lossPerLot > 0.0)
+            lossPerLot = MathAbs(profit1Lot);
+         }
+         else
+         {
+            double tickSize = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+            double tickVal  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+            if(tickSize > 0.0 && tickVal > 0.0)
+               lossPerLot = (slDist / tickSize) * tickVal;
+         }
+
+         if(lossPerLot > 0.0)
+         {
+            double calcVol = riskUsd / lossPerLot;
+            if(volume > 0.0 && calcVol > (volume * 2.5))
             {
-               double calcVol = riskUsd / lossPerLot;
-               Print("📐 [ARES RISK SIZING]: ", sym, " RiskUSD=$", DoubleToString(riskUsd, 2),
-                     " LossPerLot=$", DoubleToString(lossPerLot, 2), " -> CalcVol=", DoubleToString(calcVol, 4));
-               volume = calcVol;
+               Print("⚠️ [ARES SIZING GUARD]: calcVol=", DoubleToString(calcVol, 4),
+                     " clamped near server volume=", DoubleToString(volume, 4));
+               calcVol = volume * 1.5;
             }
+            Print("📐 [ARES RISK SIZING]: ", sym, " RiskUSD=$", DoubleToString(riskUsd, 2),
+                  " LossPerLot=$", DoubleToString(lossPerLot, 2), " -> CalcVol=", DoubleToString(calcVol, 4));
+            volume = calcVol;
          }
       }
 
       // --- سد دفاعی ۳: کنترل مارجین آزاد، سقف لات و نرمال‌سازی دقیق گام حجم ---
       double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
       double margin1Lot = 0.0;
-      ENUM_ORDER_TYPE oType = (action == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      double refPrice = (action == "BUY") ? ask : bid;
       if(freeMargin > 0.0 && refPrice > 0.0 && OrderCalcMargin(oType, sym, 1.0, refPrice, margin1Lot) && margin1Lot > 0.0)
       {
          double maxMarginVol = (freeMargin * 0.45) / margin1Lot;
@@ -569,7 +586,11 @@ void ExecuteSingleOrderJson(string orderObj)
             volume = maxMarginVol;
       }
 
-      double lotCap = (InpMaxLotCap > 0.0) ? InpMaxLotCap : 10.0;
+      string symUpper = sym;
+      StringToUpper(symUpper);
+      bool isGoldSym = (StringFind(symUpper, "XAU") >= 0 || StringFind(symUpper, "GOLD") >= 0);
+      double defaultLotCap = isGoldSym ? 5.0 : 10.0;
+      double lotCap = (InpMaxLotCap > 0.0) ? MathMin(InpMaxLotCap, defaultLotCap) : defaultLotCap;
       if(volume > lotCap)
       {
          Print("⚠️ [ARES EA GATE]: حجم (", volume, " لات) به سقف ایمن (", lotCap, " لات) محدود شد.");
@@ -591,6 +612,26 @@ void ExecuteSingleOrderJson(string orderObj)
       if(volume < minVol) volume = minVol;
       if(volume > maxVol) volume = maxVol;
       volume = NormalizeDouble(volume, volDigits);
+
+      // --- کنترل نهایی قطعی: تایید با OrderCalcProfit که ضرر واقعی این حجم در SL از riskUsd * 1.15 بیشتر نشود ---
+      if(riskUsd > 0.0 && slDist > 0.0 && refPrice > 0.0 && volume > minVol)
+      {
+         double checkProfit = 0.0;
+         if(OrderCalcProfit(oType, sym, volume, refPrice, testSL, checkProfit))
+         {
+            double actualRisk = MathAbs(checkProfit);
+            if(actualRisk > (riskUsd * 1.15))
+            {
+               double safeVol = volume * (riskUsd / actualRisk);
+               if(step > 0.0)
+                  safeVol = MathFloor((safeVol / step) + 1e-9) * step;
+               if(safeVol < minVol) safeVol = minVol;
+               volume = NormalizeDouble(safeVol, volDigits);
+               Print("🛡️ [ARES FINAL RISK CLAMP]: ActualRisk=$", DoubleToString(actualRisk, 2),
+                     " > RiskUSD=$", DoubleToString(riskUsd, 2), " -> SafeVol=", DoubleToString(volume, volDigits));
+            }
+         }
+      }
 
       double normSL = NormalizeDouble(sl, digits);
       double normTP = NormalizeDouble(tp, digits);
