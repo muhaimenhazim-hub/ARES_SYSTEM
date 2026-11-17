@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V14.9 |
-//|  ORDERCALCPROFIT EXACT SIZING, RISK CLAMP & AUTO 1:1 RISK-FREE   |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V15.0 |
+//|  ORDERCALCPROFIT SIZING, 1:1 RISK-FREE & LIVE CANDLE EXPORT BRIDGE |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.90"
+#property version   "15.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.9 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, ", OrderCalcProfit + Risk-Free ON).");
+   Print("🚀 ARES Bridge V15.0 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, ", OrderCalcProfit + Risk-Free + Live Candles ON).");
    ManageRiskFreePositions();
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
@@ -46,6 +46,7 @@ void OnTimer()
 {
    ManageRiskFreePositions();
    SyncAccountWithServer();
+   ExportLiveCandlesFile();
 }
 
 //+------------------------------------------------------------------+
@@ -746,6 +747,130 @@ void ExecuteSingleOrderJson(string orderObj)
          }
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| ساخت آرایه JSON کندل‌های یک نماد و تایم‌فریم برای پل ابری       |
+//+------------------------------------------------------------------+
+string BuildRatesArrayJson(string sym, ENUM_TIMEFRAMES tf, int count)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   int copied = CopyRates(sym, tf, 0, count, rates);
+   if(copied <= 0) return "[]";
+
+   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   if(digits < 0) digits = 5;
+
+   string json = "[";
+   for(int i = 0; i < copied; i++)
+   {
+      if(i > 0) json += ",";
+      json += StringFormat(
+         "[%I64d,%s,%s,%s,%s,%I64d]",
+         (long)rates[i].time,
+         DoubleToString(rates[i].open, digits),
+         DoubleToString(rates[i].high, digits),
+         DoubleToString(rates[i].low, digits),
+         DoubleToString(rates[i].close, digits),
+         (long)rates[i].tick_volume
+      );
+   }
+   json += "]";
+   return json;
+}
+
+//+------------------------------------------------------------------+
+//| خروجی کندل‌های لحظه‌ای هر ۱۵ ثانیه با کش ۱۸۰ ثانیه‌ای نمادها     |
+//+------------------------------------------------------------------+
+void ExportLiveCandlesFile()
+{
+   static datetime lastExportTime = 0;
+   static datetime lastSymResolve = 0;
+   static string cachedBrokerSyms[4];
+
+   datetime now = TimeLocal();
+   if(lastExportTime != 0 && (now - lastExportTime) < 15) return;
+
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   if(login <= 0) return;
+
+   string canonicalSyms[4];
+   canonicalSyms[0] = "EURUSD";
+   canonicalSyms[1] = "XAUUSD";
+   canonicalSyms[2] = "NASDAQ 100";
+   canonicalSyms[3] = "S&P 500";
+
+   if(lastSymResolve == 0 || (now - lastSymResolve) >= 180)
+   {
+      int resolvedCount = 0;
+      for(int i = 0; i < 4; i++)
+      {
+         string resolved = ResolveBrokerSymbol(canonicalSyms[i]);
+         if(TryActivateSymbol(resolved))
+         {
+            cachedBrokerSyms[i] = resolved;
+            resolvedCount++;
+         }
+         else
+         {
+            cachedBrokerSyms[i] = "";
+         }
+      }
+      if(resolvedCount > 0)
+         lastSymResolve = now;
+   }
+
+   string candlesJson = "{";
+   int added = 0;
+   for(int i = 0; i < 4; i++)
+   {
+      string bsym = cachedBrokerSyms[i];
+      if(bsym == "") continue;
+
+      string h1Json  = BuildRatesArrayJson(bsym, PERIOD_H1, 50);
+      string m15Json = BuildRatesArrayJson(bsym, PERIOD_M15, 60);
+      string m5Json  = BuildRatesArrayJson(bsym, PERIOD_M5, 60);
+      if(h1Json == "[]" || m15Json == "[]" || m5Json == "[]") continue;
+
+      string safeBsym = bsym;
+      StringReplace(safeBsym, "\"", "");
+
+      if(added > 0) candlesJson += ",";
+      candlesJson += "\"" + canonicalSyms[i] + "\":{\"broker_symbol\":\"" + safeBsym +
+                     "\",\"1h\":" + h1Json + ",\"15m\":" + m15Json + ",\"5m\":" + m5Json + "}";
+      added++;
+   }
+   candlesJson += "}";
+
+   if(added == 0) return;
+
+   string company = AccountInfoString(ACCOUNT_COMPANY);
+   string server  = AccountInfoString(ACCOUNT_SERVER);
+   StringReplace(company, "\"", "");
+   StringReplace(server, "\"", "");
+
+   string payload = "{\"login\":" + IntegerToString(login) +
+                    ",\"broker\":\"" + company +
+                    "\",\"server\":\"" + server +
+                    "\",\"candles\":" + candlesJson + "}";
+
+   char postData[];
+   int len = StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   if(len > 0) ArrayResize(postData, len - 1);
+
+   int outSize = ArraySize(postData);
+   if(outSize > 0)
+   {
+      int hOut = FileOpen("ares_candles_out.tmp", FILE_WRITE | FILE_BIN);
+      if(hOut != INVALID_HANDLE)
+      {
+         FileWriteArray(hOut, postData, 0, outSize);
+         FileClose(hOut);
+         FileMove("ares_candles_out.tmp", 0, "ares_candles_out.json", FILE_REWRITE);
+      }
+   }
+   lastExportTime = now;
 }
 
 //+------------------------------------------------------------------+

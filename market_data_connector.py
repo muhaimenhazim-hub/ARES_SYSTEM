@@ -2,11 +2,12 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 1: UNIFIED MULTI-MARKET DATA CONNECTOR (Crypto & Forex & Indices)
-VERSION: 14.0 (SMART TTL CACHE, ANTI-BAN RATE LIMITER & DUAL GOLD FEED)
+VERSION: 14.1 (MT5 LIVE CANDLES PRIORITY <=90S & YAHOO/PAXG AUTO-FALLBACK)
 ================================================================================
 """
 
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -15,6 +16,10 @@ from typing import Dict, Optional, Tuple
 import ccxt
 import numpy as np
 import pandas as pd
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LIVE_CANDLES_FILE = os.path.join(BASE_DIR, "ares_live_candles.json")
+LIVE_CANDLES_MAX_AGE_SECONDS = 90.0
 
 
 class BinanceFuturesConnector:
@@ -137,13 +142,72 @@ class MT5ForexConnector:
 
 
 class AresUnifiedDataService:
-    """هاب مرکزی داده‌های زنده ARES مجهز به کش هوشمند جهت جلوگیری از مسدودیت IP"""
+    """هاب مرکزی داده‌های زنده ARES با اولویت کندل‌های لحظه‌ای متاتریدر (MT5_LIVE) و پشتیبان یاهو"""
 
     def __init__(self, cache_ttl_seconds: float = 4.0):
         self.binance = BinanceFuturesConnector()
         self.mt5 = MT5ForexConnector()
         self.cache_ttl = cache_ttl_seconds
         self._bundle_cache: Dict[str, Tuple[float, Dict]] = {}
+
+    @staticmethod
+    def _rates_to_dataframe(rows: object, min_len: int = 15) -> Optional[pd.DataFrame]:
+        if not isinstance(rows, list) or len(rows) < min_len:
+            return None
+        try:
+            df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"]).dropna()
+            if len(df) < min_len:
+                return None
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = df[col].astype(np.float64)
+            df = df.sort_values("timestamp").reset_index(drop=True)
+            return df
+        except Exception:
+            return None
+
+    def _load_mt5_live_bundle(self, symbol: str) -> Optional[Dict]:
+        if not os.path.exists(LIVE_CANDLES_FILE):
+            return None
+        try:
+            with open(LIVE_CANDLES_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                return None
+            symbols_map = payload.get("symbols")
+            if not isinstance(symbols_map, dict):
+                return None
+            sym_entry = symbols_map.get(symbol)
+            if not isinstance(sym_entry, dict):
+                return None
+
+            updated_ts = float(sym_entry.get("updated_ts", 0.0) or 0.0)
+            if updated_ts <= 0.0 or (time.time() - updated_ts) > LIVE_CANDLES_MAX_AGE_SECONDS:
+                return None
+
+            df_htf = self._rates_to_dataframe(sym_entry.get("1h"), min_len=10)
+            df_mtf = self._rates_to_dataframe(sym_entry.get("15m"), min_len=15)
+            df_ltf = self._rates_to_dataframe(sym_entry.get("5m"), min_len=15)
+            if df_htf is None or df_mtf is None or df_ltf is None:
+                return None
+
+            current_price = float(df_ltf.iloc[-1]["close"])
+            if current_price <= 0.0:
+                return None
+
+            source_label = str(sym_entry.get("source", "")).strip() or "MT5_LIVE"
+            return {
+                "symbol": symbol,
+                "market_type": "FOREX_OR_INDICES",
+                "current_price": current_price,
+                "df_htf": df_htf,
+                "df_mtf": df_mtf,
+                "df_ltf": df_ltf,
+                "source": source_label,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception:
+            return None
 
     def get_live_multitimeframe_bundle(self, symbol: str) -> Optional[Dict]:
         now = time.time()
@@ -154,14 +218,35 @@ class AresUnifiedDataService:
 
         if symbol in self.binance.CRYPTO_SYMBOLS:
             market_type = "CRYPTO_FUTURES"
-            connector = self.binance
-        else:
-            market_type = "FOREX_OR_INDICES"
-            connector = self.mt5
+            df_htf = self.binance.fetch_ohlcv(symbol, timeframe="1h", limit=50)
+            df_mtf = self.binance.fetch_ohlcv(symbol, timeframe="15m", limit=60)
+            df_ltf = self.binance.fetch_ohlcv(symbol, timeframe="5m", limit=60)
+            if df_htf is None or df_mtf is None or df_ltf is None:
+                return None
+            current_price = float(df_ltf.iloc[-1]["close"])
+            bundle = {
+                "symbol": symbol,
+                "market_type": market_type,
+                "current_price": current_price,
+                "df_htf": df_htf,
+                "df_mtf": df_mtf,
+                "df_ltf": df_ltf,
+                "source": "BINANCE_FUTURES",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            self._bundle_cache[symbol] = (now, bundle)
+            return bundle
 
-        df_htf = connector.fetch_ohlcv(symbol, timeframe="1h", limit=50)
-        df_mtf = connector.fetch_ohlcv(symbol, timeframe="15m", limit=60)
-        df_ltf = connector.fetch_ohlcv(symbol, timeframe="5m", limit=60)
+        # اولویت ۱: کندل‌های لحظه‌ای و بدون تاخیر مستقیم از متاتریدر ۵ سرور
+        live_bundle = self._load_mt5_live_bundle(symbol)
+        if live_bundle is not None:
+            self._bundle_cache[symbol] = (now, live_bundle)
+            return live_bundle
+
+        # اولویت ۲ (پشتیبان): دریافت از یاهو فایننس در صورت نبود تیک زنده متاتریدر
+        df_htf = self.mt5.fetch_ohlcv(symbol, timeframe="1h", limit=50)
+        df_mtf = self.mt5.fetch_ohlcv(symbol, timeframe="15m", limit=60)
+        df_ltf = self.mt5.fetch_ohlcv(symbol, timeframe="5m", limit=60)
 
         if df_htf is None or df_mtf is None or df_ltf is None:
             return None
@@ -170,11 +255,12 @@ class AresUnifiedDataService:
 
         bundle = {
             "symbol": symbol,
-            "market_type": market_type,
+            "market_type": "FOREX_OR_INDICES",
             "current_price": current_price,
             "df_htf": df_htf,
             "df_mtf": df_mtf,
             "df_ltf": df_ltf,
+            "source": "YAHOO_BACKUP",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._bundle_cache[symbol] = (now, bundle)

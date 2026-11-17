@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 15.1 (LOT CAP 10.0 SYNC, ARONMARKETS SERVERS.DAT & CLOUD FILE BRIDGE)
+VERSION: 15.2 (MT5 LIVE CANDLE BRIDGE WITH PER-SYMBOL SOURCE LOCK)
 ================================================================================
 """
 
@@ -23,6 +23,8 @@ INSTANCES_DIR = "/root/mt5_instances"
 BASE_MT5_DIR = "/root/.wine/drive_c/Program Files/MetaTrader 5"
 GLOBAL_CONFIG_SRC = "/root/mt5_config"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+LIVE_CANDLES_FILE = os.path.join(PROJECT_DIR, "ares_live_candles.json")
+CANDLE_SOURCE_LOCK_SECONDS = 75.0
 
 # جدول نگاشت هوشمند نام استاندارد بروکرهای جهانی
 UNIVERSAL_BROKER_MAP = {
@@ -43,6 +45,7 @@ class AresMT5MultiManager:
         self.db = db or AresDatabaseManager()
         os.makedirs(INSTANCES_DIR, exist_ok=True)
         self._poisoned_hashes = self._compute_poisoned_hashes()
+        self._live_candles_state: Dict[str, Any] = self._load_live_candles_state()
 
     @staticmethod
     def _file_md5(path: str) -> str:
@@ -82,7 +85,7 @@ class AresMT5MultiManager:
 
     @staticmethod
     def _cred_hash(login: str, password: str, server: str, ea_stamp: str = "0") -> str:
-        raw = f"V15.1|{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
+        raw = f"V15.2|{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
         return hashlib.md5(raw).hexdigest()
 
     def ensure_base_ea_compiled(self):
@@ -481,8 +484,103 @@ Period=M15
             print(f"⚠️ [خطا در اتصال اکانت {login}]: {e}", flush=True)
             return False
 
+    def _load_live_candles_state(self) -> Dict[str, Any]:
+        if os.path.exists(LIVE_CANDLES_FILE):
+            try:
+                with open(LIVE_CANDLES_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and isinstance(data.get("symbols"), dict):
+                    return data
+            except Exception:
+                pass
+        return {"updated_ts": 0.0, "symbols": {}}
+
+    def _save_live_candles_state(self) -> None:
+        tmp_path = f"{LIVE_CANDLES_FILE}.{os.getpid()}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._live_candles_state, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp_path, LIVE_CANDLES_FILE)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    def _ingest_instance_candles(self, files_dir: str) -> bool:
+        """خواندن کندل‌های لحظه‌ای متاتریدر و ذخیره اتمی در ares_live_candles.json با قفل منبع هر نماد"""
+        candles_file = os.path.join(files_dir, "ares_candles_out.json")
+        if not os.path.exists(candles_file):
+            return False
+
+        reading_file = os.path.join(files_dir, "ares_candles_out.reading")
+        payload = None
+        try:
+            os.replace(candles_file, reading_file)
+            with open(reading_file, "r", encoding="utf-8", errors="ignore") as f:
+                payload = json.load(f)
+        except Exception:
+            return False
+        finally:
+            if os.path.exists(reading_file):
+                try:
+                    os.remove(reading_file)
+                except Exception:
+                    pass
+
+        if not isinstance(payload, dict):
+            return False
+        login_str = str(payload.get("login", "")).strip()
+        candles_map = payload.get("candles")
+        if login_str in ("", "0") or not isinstance(candles_map, dict):
+            return False
+
+        now_ts = time.time()
+        symbols_state = self._live_candles_state.setdefault("symbols", {})
+        updated_any = False
+
+        for canonical_sym, tf_data in candles_map.items():
+            if not isinstance(tf_data, dict):
+                continue
+            r_1h = tf_data.get("1h")
+            r_15m = tf_data.get("15m")
+            r_5m = tf_data.get("5m")
+            if not (
+                isinstance(r_1h, list) and len(r_1h) >= 10
+                and isinstance(r_15m, list) and len(r_15m) >= 15
+                and isinstance(r_5m, list) and len(r_5m) >= 15
+            ):
+                continue
+
+            existing = symbols_state.get(canonical_sym)
+            if isinstance(existing, dict):
+                locked_login = str(existing.get("login", "")).strip()
+                locked_ts = float(existing.get("updated_ts", 0.0) or 0.0)
+                if locked_login and locked_login != login_str and (now_ts - locked_ts) < CANDLE_SOURCE_LOCK_SECONDS:
+                    continue
+
+            symbols_state[canonical_sym] = {
+                "symbol": canonical_sym,
+                "broker_symbol": str(tf_data.get("broker_symbol", canonical_sym)),
+                "source": f"MT5_LIVE:{login_str}",
+                "login": login_str,
+                "broker": str(payload.get("broker", "")),
+                "server": str(payload.get("server", "")),
+                "updated_ts": now_ts,
+                "1h": r_1h,
+                "15m": r_15m,
+                "5m": r_5m,
+            }
+            updated_any = True
+
+        if updated_any:
+            self._live_candles_state["updated_ts"] = now_ts
+            self._save_live_candles_state()
+        return updated_any
+
     def process_local_file_bridges(self):
-        """پل ارتباطی فایل محلی برای انتقال تیک‌ها و دستورات متاتریدرهای ابری بدون محدودیت ۴۰۱۴"""
+        """پل ارتباطی فایل محلی برای انتقال تیک‌ها، کندل‌های لحظه‌ای و دستورات متاتریدرهای ابری بدون محدودیت ۴۰۱۴"""
         if not os.path.exists(INSTANCES_DIR):
             return
 
@@ -491,6 +589,8 @@ Period=M15
 
         for entry in os.listdir(INSTANCES_DIR):
             files_dir = os.path.join(INSTANCES_DIR, entry, "MQL5", "Files")
+            self._ingest_instance_candles(files_dir)
+
             out_file = os.path.join(files_dir, "ares_sync_out.json")
             if not os.path.exists(out_file):
                 continue
@@ -595,7 +695,7 @@ Period=M15
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.1 - همگام‌سازی سقف لات ۱۰، سرورهای آرون‌مارکتس و پل ابری) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.2 - پل کندل لحظه‌ای متاتریدر با قفل منبع هر نماد) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         bridge_thread = threading.Thread(target=self.run_file_bridge_loop, daemon=True)
