@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 01: CRT STRATEGY ENGINE (Candle Range Theory)
-VERSION: 14.0 (STRICT CAUSAL SWING DETECTION & ZERO LOOK-AHEAD BIAS)
+VERSION: 14.1 (POST-SWEEP DISPLACEMENT & RETEST-PERSISTENT CAUSAL MSS)
 ================================================================================
 """
 
@@ -362,9 +362,34 @@ class CRTStrategyEngine:
                 rejection_evidence=["هیچ سویپ معتبری در مرزهای کندل مرجع مشاهده نشد."],
             )
 
-        last_candle = df_mtf.iloc[-2]
-        is_disp, disp_strength = self.detect_displacement(last_candle, current_atr)
+        # بررسی مومنتوم (Displacement) در کندل‌های بسته‌شده از زمان سویپ تا آخرین کندل بسته (حفظ تاییدیه هنگام پولبک)
+        if direction == "BUY":
+            sweep_pos = int(np.argmin(recent_mtf["low"].to_numpy()))
+        else:
+            sweep_pos = int(np.argmax(recent_mtf["high"].to_numpy()))
+
+        disp_window = recent_mtf.iloc[sweep_pos:-1] if sweep_pos < (len(recent_mtf) - 1) else df_mtf.iloc[-2:-1]
+        is_disp = False
+        disp_strength = 0.0
+        for _, row in disp_window.iterrows():
+            is_dir_candle = (
+                float(row["close"]) > float(row["open"])
+                if direction == "BUY"
+                else float(row["close"]) < float(row["open"])
+            )
+            cand_disp, cand_strength = self.detect_displacement(row, current_atr)
+            if is_dir_candle and cand_strength > disp_strength:
+                disp_strength = cand_strength
+            if is_dir_candle and cand_disp:
+                is_disp = True
+        if disp_strength == 0.0:
+            _, disp_strength = self.detect_displacement(df_mtf.iloc[-2], current_atr)
+
         displacement_status = "CONFIRMED" if is_disp else "WEAK"
+        if is_disp:
+            confirmations.append(f"مومنتوم قوی (Displacement) با قدرت {disp_strength:.2f} ATR تایید شد.")
+        else:
+            rejections.append("مومنتوم حرکت برگشتی (Displacement) کافی نیست.")
 
         swing_highs_ltf, swing_lows_ltf = self.detect_swings_causal(df_ltf)
         mss_status = "NONE"
@@ -372,22 +397,35 @@ class CRTStrategyEngine:
 
         if direction == "BUY":
             high_indices = np.where(swing_highs_ltf)[0]
-            if len(high_indices) > 0:
-                last_swing_idx = high_indices[-1]
-                target_level = float(df_ltf.iloc[last_swing_idx]["high"])
-                if float(df_ltf.iloc[-1]["close"]) > target_level:
+            for s_idx in reversed(high_indices[-3:]):
+                target_level = float(df_ltf.iloc[s_idx]["high"])
+                post_swing = df_ltf.iloc[s_idx + 1:]
+                if (
+                    len(post_swing) > 0
+                    and float(post_swing["close"].max()) > target_level
+                    and float(df_ltf.iloc[-1]["close"]) > ref_range.low
+                ):
                     mss_status = "CONFIRMED"
                     mss_level = target_level
                     confirmations.append(f"تغییر ساختار بازار (MSS صعودی) در سطح {target_level:.4f} تایید شد.")
+                    break
         elif direction == "SELL":
             low_indices = np.where(swing_lows_ltf)[0]
-            if len(low_indices) > 0:
-                last_swing_idx = low_indices[-1]
-                target_level = float(df_ltf.iloc[last_swing_idx]["low"])
-                if float(df_ltf.iloc[-1]["close"]) < target_level:
+            for s_idx in reversed(low_indices[-3:]):
+                target_level = float(df_ltf.iloc[s_idx]["low"])
+                post_swing = df_ltf.iloc[s_idx + 1:]
+                if (
+                    len(post_swing) > 0
+                    and float(post_swing["close"].min()) < target_level
+                    and float(df_ltf.iloc[-1]["close"]) < ref_range.high
+                ):
                     mss_status = "CONFIRMED"
                     mss_level = target_level
                     confirmations.append(f"تغییر ساختار بازار (MSS نزولی) در سطح {target_level:.4f} تایید شد.")
+                    break
+
+        if mss_status != "CONFIRMED":
+            rejections.append("تغییر ساختار بازار (MSS) در تایم‌فریم پایین هنوز تایید نشده است.")
 
         fvgs = self.detect_fvgs(df_mtf, timeframe_label=mtf_label)
         active_fvg_dicts = []

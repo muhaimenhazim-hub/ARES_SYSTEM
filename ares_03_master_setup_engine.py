@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 03: MASTER SETUP ENGINE
-VERSION: 14.2 (LIVE MARKET ENTRY ANCHORING, SAFE MIN SL FLOOR & EXACT 1:1.5 RR)
+VERSION: 14.3 (STRICT VALIDATION GATE: MSS+DISPLACEMENT & MANDATORY FVG/OB RETEST)
 ================================================================================
 """
 
@@ -79,12 +79,61 @@ class MasterSetupEngine:
     def __init__(self, min_rr_ratio: float = 1.5):
         self.min_rr_ratio = min_rr_ratio
 
+    @staticmethod
+    def _has_retest_confirmation(
+        direction: str,
+        current_market_price: float,
+        crt_data: Dict,
+        smc_data: Dict,
+    ) -> Tuple[bool, Optional[Dict[str, float]]]:
+        """بررسی اینکه قیمت واقعاً به یک ناحیه فعال FVG یا Order Block پولبک (Retest) کرده باشد"""
+        price = float(current_market_price or 0.0)
+        if price <= 0.0 or direction not in ("BUY", "SELL"):
+            return False, None
+
+        candidate_zones: List[Tuple[float, float]] = []
+
+        for fvg in crt_data.get("fvgs", []) or []:
+            if not isinstance(fvg, dict):
+                continue
+            top = float(fvg.get("top", 0.0) or 0.0)
+            bottom = float(fvg.get("bottom", 0.0) or 0.0)
+            if top > 0.0 and bottom > 0.0:
+                candidate_zones.append((min(bottom, top), max(bottom, top)))
+
+        expected_ob_dir = "BULLISH" if direction == "BUY" else "BEARISH"
+        for ob in smc_data.get("order_blocks", []) or []:
+            if not isinstance(ob, dict):
+                continue
+            if str(ob.get("direction", "")).upper() != expected_ob_dir:
+                continue
+            top = float(ob.get("top", 0.0) or 0.0)
+            bottom = float(ob.get("bottom", 0.0) or 0.0)
+            if top > 0.0 and bottom > 0.0:
+                candidate_zones.append((min(bottom, top), max(bottom, top)))
+
+        rz = crt_data.get("retest_zone")
+        if isinstance(rz, dict):
+            eh = float(rz.get("entry_high", 0.0) or 0.0)
+            el = float(rz.get("entry_low", 0.0) or 0.0)
+            if eh > 0.0 and el > 0.0:
+                candidate_zones.append((min(el, eh), max(el, eh)))
+
+        for z_low, z_high in candidate_zones:
+            z_height = max(0.0, z_high - z_low)
+            tol = max(z_height * 0.20, price * 0.0003)
+            if (z_low - tol) <= price <= (z_high + tol):
+                return True, {"zone_low": z_low, "zone_high": z_high}
+
+        return False, None
+
     def calculate_score(
         self,
         crt_data: Dict,
         smc_data: Dict,
         session_valid: bool = True,
         in_news_window: bool = False,
+        retest_confirmed: Optional[bool] = None,
     ) -> Tuple[float, Dict[str, float]]:
         breakdown = {
             "market_structure": 0.0,
@@ -132,7 +181,12 @@ class MasterSetupEngine:
         elif crt_dir != "NONE":
             breakdown["mtf_alignment"] = 5.0
 
-        if crt_data.get("retest_zone") is not None:
+        has_retest = (
+            retest_confirmed
+            if retest_confirmed is not None
+            else (crt_data.get("retest_zone") is not None)
+        )
+        if has_retest:
             breakdown["entry_confirmation"] = 10.0
 
         if session_valid and not in_news_window:
@@ -199,12 +253,87 @@ class MasterSetupEngine:
                 rejection_reason="ورود به معامله در بازه ۳۰ دقیقه قبل و بعد از خبر مهم ممنوع است.",
             )
 
-        total_score, breakdown = self.calculate_score(
-            crt_result_dict, smc_result_dict, session_valid, in_news_window
-        )
-
         setup_name = self.identify_primary_setup(crt_result_dict, smc_result_dict)
+
+        # گیت ۱: اجباری بودن تاییدیه کامل CRT شامل Sweep + بازگشت به رنج + MSS + Displacement
+        crt_status = crt_result_dict.get("status", "NO_SETUP")
+        sweep_info = crt_result_dict.get("sweep", {})
+        ms_info = crt_result_dict.get("market_structure", {})
+        has_full_crt = (
+            direction in ("BUY", "SELL")
+            and crt_status == "VALID"
+            and sweep_info.get("status") == "VALID_SWEEP"
+            and bool(sweep_info.get("closed_inside", False))
+            and ms_info.get("mss_status") == "CONFIRMED"
+            and ms_info.get("displacement_status") == "CONFIRMED"
+        )
+        if not has_full_crt:
+            total_score, breakdown = self.calculate_score(
+                crt_result_dict,
+                smc_result_dict,
+                session_valid,
+                in_news_window,
+                retest_confirmed=False,
+            )
+            return SetupOpportunity(
+                opportunity_id=opp_id,
+                symbol=symbol,
+                market=market,
+                direction=direction,
+                setup_name=setup_name,
+                entry_price=current_market_price,
+                stop_loss=0.0,
+                take_profit_1=0.0,
+                take_profit_2=0.0,
+                take_profit_3=0.0,
+                risk_reward_ratio=0.0,
+                total_score=total_score,
+                score_breakdown=breakdown,
+                suggested_risk_pct=0.0,
+                is_counter_trend=False,
+                status="REJECTED",
+                rejection_reason="ستاپ هنوز تاییدیه کامل (Sweep + بازگشت به رنج + MSS + Displacement) را دریافت نکرده است.",
+            )
+
+        # گیت ۲: اجباری بودن پولبک (Retest) قیمت به ناحیه فعال FVG یا Order Block
+        retest_ok, matched_zone = self._has_retest_confirmation(
+            direction=direction,
+            current_market_price=current_market_price,
+            crt_data=crt_result_dict,
+            smc_data=smc_result_dict,
+        )
+        total_score, breakdown = self.calculate_score(
+            crt_result_dict,
+            smc_result_dict,
+            session_valid,
+            in_news_window,
+            retest_confirmed=retest_ok,
+        )
+        if not retest_ok or matched_zone is None:
+            return SetupOpportunity(
+                opportunity_id=opp_id,
+                symbol=symbol,
+                market=market,
+                direction=direction,
+                setup_name=setup_name,
+                entry_price=current_market_price,
+                stop_loss=0.0,
+                take_profit_1=0.0,
+                take_profit_2=0.0,
+                take_profit_3=0.0,
+                risk_reward_ratio=0.0,
+                total_score=total_score,
+                score_breakdown=breakdown,
+                suggested_risk_pct=0.0,
+                is_counter_trend=False,
+                status="REJECTED",
+                rejection_reason="تاییدیه اولیه کامل است؛ اما ربات منتظر پولبک (Retest) قیمت به ناحیه FVG یا Order Block است.",
+            )
+
         confirmations.append(f"الگوی ستاپ شناسایی شده: {setup_name}")
+        confirmations.append(
+            f"پولبک (Retest) قیمت به ناحیه معتبر ({matched_zone['zone_low']:.5f} تا {matched_zone['zone_high']:.5f}) تایید شد."
+        )
 
         trend = smc_result_dict.get("trend_direction", "RANGING")
         is_counter_trend = (
