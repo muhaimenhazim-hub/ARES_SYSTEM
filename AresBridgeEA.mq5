@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V14.7 |
-//|  STRICT SPX/NDX INDEX FILTER, TRADE-MODE GATE & CLOUD BRIDGE     |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V14.8 |
+//|  EXACT BROKER RISK SIZING, AUTO 1:1 RISK-FREE & CLOUD BRIDGE     |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.70"
+#property version   "14.80"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -14,7 +14,7 @@ input string InpUserIdentifier   = "";    // ایمیل یا شماره موبا
 input int    InpSyncSeconds      = 2;     // فاصله همگام سازی (ثانیه)
 input int    InpSlippagePoints   = 50;    // حداکثر لغزش مجاز (پوینت)
 input int    InpMaxOpenPositions = 3;     // سقف قطعی کل معاملات همزمان
-input double InpMaxLotCap        = 0.50;  // سقف قطعی حجم هر معامله (لات)
+input double InpMaxLotCap        = 10.0;  // سقف ایمنی حجم هر معامله (لات)
 
 CTrade ExtTrade;
 
@@ -25,7 +25,8 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.7 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
+   Print("🚀 ARES Bridge V14.8 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, ", Auto Risk-Free 1:1 ON).");
+   ManageRiskFreePositions();
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
 }
@@ -43,7 +44,78 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
+   ManageRiskFreePositions();
    SyncAccountWithServer();
+}
+
+//+------------------------------------------------------------------+
+//| ریسک‌فری خودکار به محض رسیدن معامله به سود 1:1                   |
+//+------------------------------------------------------------------+
+void ManageRiskFreePositions()
+{
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+
+      string sym       = PositionGetString(POSITION_SYMBOL);
+      long   posType   = PositionGetInteger(POSITION_TYPE);
+      double priceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl        = PositionGetDouble(POSITION_SL);
+      double tp        = PositionGetDouble(POSITION_TP);
+      if(sl <= 0.0 || priceOpen <= 0.0) continue;
+
+      int    digits     = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+      double point      = SymbolInfoDouble(sym, SYMBOL_POINT);
+      double ask        = SymbolInfoDouble(sym, SYMBOL_ASK);
+      double bid        = SymbolInfoDouble(sym, SYMBOL_BID);
+      double stopsLevel = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * point;
+      if(ask <= 0.0 || bid <= 0.0 || point <= 0.0) continue;
+
+      if(posType == POSITION_TYPE_BUY)
+      {
+         if(sl < priceOpen)
+         {
+            double riskDist = priceOpen - sl;
+            if(riskDist > (5.0 * point) && bid >= (priceOpen + riskDist))
+            {
+               double beSL = NormalizeDouble(priceOpen + (riskDist * 0.05), digits);
+               if(beSL <= priceOpen) beSL = NormalizeDouble(priceOpen + point, digits);
+               double maxAllowedSL = NormalizeDouble(bid - stopsLevel - (2.0 * point), digits);
+               if(beSL > maxAllowedSL) beSL = maxAllowedSL;
+
+               if(beSL > sl && beSL >= priceOpen)
+               {
+                  SetSymbolFillingMode(sym);
+                  if(ExtTrade.PositionModify(ticket, beSL, tp))
+                     Print("🛡️ [ARES RISK-FREE]: BUY #", ticket, " (", sym, ") reached 1:1 RR -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
+               }
+            }
+         }
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         if(sl > priceOpen)
+         {
+            double riskDist = sl - priceOpen;
+            if(riskDist > (5.0 * point) && ask <= (priceOpen - riskDist))
+            {
+               double beSL = NormalizeDouble(priceOpen - (riskDist * 0.05), digits);
+               if(beSL >= priceOpen) beSL = NormalizeDouble(priceOpen - point, digits);
+               double minAllowedSL = NormalizeDouble(ask + stopsLevel + (2.0 * point), digits);
+               if(beSL < minAllowedSL) beSL = minAllowedSL;
+
+               if(beSL < sl && beSL <= priceOpen)
+               {
+                  SetSymbolFillingMode(sym);
+                  if(ExtTrade.PositionModify(ticket, beSL, tp))
+                     Print("🛡️ [ARES RISK-FREE]: SELL #", ticket, " (", sym, ") reached 1:1 RR -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
+               }
+            }
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -412,6 +484,7 @@ void ExecuteSingleOrderJson(string orderObj)
    double tp        = StringToDouble(ExtractJsonVal(orderObj, "tp"));
    double slDist    = StringToDouble(ExtractJsonVal(orderObj, "sl_dist"));
    double tpDist    = StringToDouble(ExtractJsonVal(orderObj, "tp_dist"));
+   double riskUsd   = StringToDouble(ExtractJsonVal(orderObj, "risk_usd"));
    ulong  ticket    = (ulong)StringToInteger(ExtractJsonVal(orderObj, "ticket"));
 
    string sym = ResolveBrokerSymbol(rawSymbol);
@@ -454,11 +527,53 @@ void ExecuteSingleOrderJson(string orderObj)
          }
       }
 
-      // --- سد دفاعی ۳: اعمال سقف حجم ایمن و نرمال‌سازی دقیق گام حجم ---
-      if(volume > InpMaxLotCap)
+      double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+      double stopsLevel = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * point;
+      double spread     = MathMax(0.0, ask - bid);
+
+      if(slDist > 0.0)
       {
-         Print("⚠️ [ARES EA GATE]: حجم ارسالی (", volume, " لات) از سقف مجاز (", InpMaxLotCap, " لات) بیشتر بود؛ به سقف ایمن کاهش یافت.");
-         volume = InpMaxLotCap;
+         double minAllowedDist = stopsLevel + spread + (10.0 * point);
+         if(slDist < minAllowedDist)
+            slDist = minAllowedDist;
+      }
+
+      // --- محاسبه دقیق حجم متناسب با ریسک دلاری واقعی بر اساس ارزش تیک واقعی همین بروکر ---
+      if(riskUsd > 0.0 && slDist > 0.0)
+      {
+         double tickSize = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+         double tickVal  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
+         if(tickSize > 0.0 && tickVal > 0.0)
+         {
+            double lossPerLot = (slDist / tickSize) * tickVal;
+            if(lossPerLot > 0.0)
+            {
+               double calcVol = riskUsd / lossPerLot;
+               Print("📐 [ARES RISK SIZING]: ", sym, " RiskUSD=$", DoubleToString(riskUsd, 2),
+                     " LossPerLot=$", DoubleToString(lossPerLot, 2), " -> CalcVol=", DoubleToString(calcVol, 4));
+               volume = calcVol;
+            }
+         }
+      }
+
+      // --- سد دفاعی ۳: کنترل مارجین آزاد، سقف لات و نرمال‌سازی دقیق گام حجم ---
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      double margin1Lot = 0.0;
+      ENUM_ORDER_TYPE oType = (action == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double refPrice = (action == "BUY") ? ask : bid;
+      if(freeMargin > 0.0 && refPrice > 0.0 && OrderCalcMargin(oType, sym, 1.0, refPrice, margin1Lot) && margin1Lot > 0.0)
+      {
+         double maxMarginVol = (freeMargin * 0.45) / margin1Lot;
+         if(volume > maxMarginVol)
+            volume = maxMarginVol;
+      }
+
+      double lotCap = (InpMaxLotCap > 0.0) ? InpMaxLotCap : 10.0;
+      if(volume > lotCap)
+      {
+         Print("⚠️ [ARES EA GATE]: حجم (", volume, " لات) به سقف ایمن (", lotCap, " لات) محدود شد.");
+         volume = lotCap;
       }
 
       double minVol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
@@ -477,21 +592,12 @@ void ExecuteSingleOrderJson(string orderObj)
       if(volume > maxVol) volume = maxVol;
       volume = NormalizeDouble(volume, volDigits);
 
-      double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
-      double bid = SymbolInfoDouble(sym, SYMBOL_BID);
-      double stopsLevel = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * point;
-      double spread     = MathMax(0.0, ask - bid);
-
       double normSL = NormalizeDouble(sl, digits);
       double normTP = NormalizeDouble(tp, digits);
 
       // --- محاسبه دقیق SL و TP نسبت به قیمت لحظه‌ای واقعی بروکر (تضمین نسبت 1:1.5) ---
       if(slDist > 0.0)
       {
-         double minAllowedDist = stopsLevel + spread + (10.0 * point);
-         if(slDist < minAllowedDist)
-            slDist = minAllowedDist;
-
          double effectiveTpDist = (tpDist > 0.0) ? MathMax(tpDist, slDist * 1.5) : (slDist * 1.5);
 
          if(action == "BUY")

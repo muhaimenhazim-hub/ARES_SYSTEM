@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 03: MASTER SETUP ENGINE
-VERSION: 14.1 (LIVE MARKET ENTRY ANCHORING, STRICT SL/TP & FLOAT PRECISION FIX)
+VERSION: 14.2 (LIVE MARKET ENTRY ANCHORING, SAFE MIN SL FLOOR & EXACT 1:1.5 RR)
 ================================================================================
 """
 
@@ -271,8 +271,8 @@ class MasterSetupEngine:
         if direction == "BUY":
             stop_loss = float(inv_price) if (inv_price and float(inv_price) < entry_price) else (entry_price * 0.996)
             risk_dist = entry_price - stop_loss
-            if risk_dist <= (entry_price * 0.0003):
-                risk_dist = entry_price * 0.0025
+            if risk_dist <= (entry_price * 0.0012):
+                risk_dist = entry_price * 0.0020
                 stop_loss = entry_price - risk_dist
 
             tp1 = entry_price + (risk_dist * 1.5)
@@ -283,8 +283,8 @@ class MasterSetupEngine:
         elif direction == "SELL":
             stop_loss = float(inv_price) if (inv_price and float(inv_price) > entry_price) else (entry_price * 1.004)
             risk_dist = stop_loss - entry_price
-            if risk_dist <= (entry_price * 0.0003):
-                risk_dist = entry_price * 0.0025
+            if risk_dist <= (entry_price * 0.0012):
+                risk_dist = entry_price * 0.0020
                 stop_loss = entry_price + risk_dist
 
             tp1 = entry_price - (risk_dist * 1.5)

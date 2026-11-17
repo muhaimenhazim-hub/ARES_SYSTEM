@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 05: RISK MANAGEMENT & PORTFOLIO CONTROL ENGINE
-VERSION: 14.3 (HARD LOT CAPS, DYNAMIC STEP PRECISION & DRAWDOWN PROTECTION)
+VERSION: 14.4 (ACCOUNT-PROPORTIONAL LOT SIZING, MIN 0.25% RISK & MARGIN GUARD)
 ================================================================================
 """
 
@@ -61,9 +61,10 @@ class RiskGateDecision:
 class RiskManagementPortfolioEngine:
     """موتور مرکزی مدیریت ریسک و سرمایه ARES"""
 
-    # سقف نهایی حجم برای جلوگیری از هرگونه خطای فرمولی یا بروکر
-    HARD_MAX_LOT_FOREX = 0.50
-    HARD_MAX_LOT_GOLD = 0.30
+    # سقف ایمنی نهایی لات متناسب با حساب‌های کوچک و بزرگ (همراه با گارد مارجین)
+    HARD_MAX_LOT_FOREX = 10.0
+    HARD_MAX_LOT_GOLD = 5.0
+    HARD_MAX_LOT_INDICES = 10.0
 
     def __init__(
         self,
@@ -133,17 +134,18 @@ class RiskManagementPortfolioEngine:
         risk_usd: float,
         specs: ContractSpecs,
     ) -> Tuple[float, float, float]:
-        """محاسبه دقیق حجم با رعایت سقف‌های ایمنی و دقت واقعی گام حجم هر نماد"""
+        """محاسبه دقیق حجم بر اساس ریسک واقعی دلاری حساب، گام حجم نماد و سقف ایمن مارجین"""
         contract_size = specs.contract_size
         clean_symbol = specs.symbol.replace(" ", "").replace(".", "").upper()
 
-        # تطبیق اندازه قرارداد استاندارد فارکس و انس طلا در بروکرهای متاتریدر
         if "XAU" in clean_symbol or "GOLD" in clean_symbol:
             contract_size = 100.0
-            max_allowed_lot = self.HARD_MAX_LOT_GOLD
-        elif clean_symbol in ["EURUSD", "GBPUSD", "AUDUSD", "USDJPY"]:
+            max_allowed_lot = min(specs.max_volume, self.HARD_MAX_LOT_GOLD)
+        elif clean_symbol in ["EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCAD", "USDCHF", "NZDUSD"]:
             contract_size = 100000.0
-            max_allowed_lot = self.HARD_MAX_LOT_FOREX
+            max_allowed_lot = min(specs.max_volume, self.HARD_MAX_LOT_FOREX)
+        elif any(idx in clean_symbol for idx in ("NASDAQ", "NAS100", "USTEC", "US100", "NDX", "S&P", "US500", "SP500", "SPX")):
+            max_allowed_lot = min(specs.max_volume, self.HARD_MAX_LOT_INDICES)
         else:
             max_allowed_lot = specs.max_volume
 
@@ -155,6 +157,12 @@ class RiskManagementPortfolioEngine:
 
         raw_volume = risk_usd / loss_per_unit
 
+        effective_leverage = specs.leverage if specs.leverage > 0 else 100.0
+        margin_per_lot = (entry_price * contract_size) / effective_leverage
+        if margin_per_lot > 0 and self._current_equity > 0:
+            safe_margin_lot = (self._current_equity * 0.45) / margin_per_lot
+            max_allowed_lot = min(max_allowed_lot, max(specs.min_volume, safe_margin_lot))
+
         step = specs.volume_step
         if step > 0:
             step_str = f"{step:.8f}".rstrip("0")
@@ -164,15 +172,20 @@ class RiskManagementPortfolioEngine:
         else:
             rounded_volume = round(raw_volume, 2)
 
-        # اعمال سقف حداقلی و حداکثری ایمن
         if rounded_volume < specs.min_volume:
             rounded_volume = specs.min_volume
 
         if rounded_volume > max_allowed_lot:
-            rounded_volume = max_allowed_lot
+            if step > 0:
+                step_str = f"{step:.8f}".rstrip("0")
+                decimals = len(step_str.split(".")[1]) if "." in step_str else 0
+                rounded_volume = round(float(np.floor((max_allowed_lot / step) + 1e-9) * step), decimals)
+                if rounded_volume < specs.min_volume:
+                    rounded_volume = specs.min_volume
+            else:
+                rounded_volume = max_allowed_lot
 
         notional_value = rounded_volume * entry_price * contract_size
-        effective_leverage = specs.leverage if specs.leverage > 0 else 100.0
         required_margin = notional_value / effective_leverage
 
         return rounded_volume, notional_value, required_margin
@@ -216,8 +229,9 @@ class RiskManagementPortfolioEngine:
                 rejection_reasons=[f"سقف زیان روزانه ({self.max_daily_loss_pct}٪) فعال شد."],
             )
 
-        suggested_risk = opportunity.get("scoring", {}).get("suggested_risk_pct", 1.0)
+        suggested_risk = float(opportunity.get("scoring", {}).get("suggested_risk_pct", 0.5))
         final_risk_pct = self.throttled_risk_pct if daily_loss_pct >= self.loss_throttle_threshold_pct else suggested_risk
+        final_risk_pct = max(self.throttled_risk_pct, min(1.5, final_risk_pct))
         risk_usd = (self._current_equity * final_risk_pct) / 100.0
 
         entry_price = float(opportunity.get("entry_price", opportunity.get("pricing", {}).get("entry_price", 0.0)))

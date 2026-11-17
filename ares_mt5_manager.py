@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 15.0 (ARONMARKETS SERVERS.DAT, CLEAN CONFIG ISOLATION & CLOUD FILE BRIDGE)
+VERSION: 15.1 (LOT CAP 10.0 SYNC, ARONMARKETS SERVERS.DAT & CLOUD FILE BRIDGE)
 ================================================================================
 """
 
@@ -82,7 +82,7 @@ class AresMT5MultiManager:
 
     @staticmethod
     def _cred_hash(login: str, password: str, server: str, ea_stamp: str = "0") -> str:
-        raw = f"V15|{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
+        raw = f"V15.1|{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
         return hashlib.md5(raw).hexdigest()
 
     def ensure_base_ea_compiled(self):
@@ -207,6 +207,7 @@ class AresMT5MultiManager:
                 if (
                     "path=Experts\\AresBridgeEA.ex5" in txt
                     and "expertmode=1" in txt
+                    and "InpMaxLotCap=10.0" in txt
                     and f"symbol={symbol}" in txt
                     and f"InpUserIdentifier={user_identifier}" in txt
                 ):
@@ -246,7 +247,7 @@ InpUserIdentifier={user_identifier}
 InpSyncSeconds=2
 InpSlippagePoints=50
 InpMaxOpenPositions=3
-InpMaxLotCap=0.5
+InpMaxLotCap=10.0
 </inputs>
 </expert>
 <window>
@@ -594,7 +595,7 @@ Period=M15
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.0 - سرورهای آرون‌مارکتس، پل ابری ضد ۴۰۱۴ و ایزوله‌سازی کامل) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.1 - همگام‌سازی سقف لات ۱۰، سرورهای آرون‌مارکتس و پل ابری) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         bridge_thread = threading.Thread(target=self.run_file_bridge_loop, daemon=True)

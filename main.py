@@ -2,14 +2,13 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 14.5 (TRADABLE SYMBOL GATE, INDEX DUPLICATE GUARD & 0.50 LOT CAP SYNC)
+VERSION: 14.6 (SIMULTANEOUS MULTI-ACCOUNT EXECUTION, PER-USER RISK & EXACT RISK_USD)
 ================================================================================
 """
 
-import os
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import account_config
 from ares_01_crt_strategy_engine import CRTStrategyEngine
@@ -30,11 +29,11 @@ from market_data_connector import AresUnifiedDataService
 
 class AresMasterSystem:
     SYMBOLS_SPECS = {
-        # فارکس، انس طلا و شاخص‌ها (مخصوص متاتریدر ۵ با سقف حجم ایمن هماهنگ با اکسپرت)
-        "XAUUSD": ContractSpecs("XAUUSD", min_volume=0.01, max_volume=0.30, volume_step=0.01, tick_size=0.01, contract_size=100.0, min_notional_usd=1.0, leverage=100.0),
-        "EURUSD": ContractSpecs("EURUSD", min_volume=0.01, max_volume=0.50, volume_step=0.01, tick_size=0.00001, contract_size=100000.0, min_notional_usd=1.0, leverage=100.0),
-        "NASDAQ 100": ContractSpecs("NASDAQ 100", min_volume=0.01, max_volume=0.50, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
-        "S&P 500": ContractSpecs("S&P 500", min_volume=0.01, max_volume=0.50, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
+        # فارکس، انس طلا و شاخص‌ها (مخصوص متاتریدر ۵ با سقف ایمن متناسب با حجم حساب)
+        "XAUUSD": ContractSpecs("XAUUSD", min_volume=0.01, max_volume=5.0, volume_step=0.01, tick_size=0.01, contract_size=100.0, min_notional_usd=1.0, leverage=100.0),
+        "EURUSD": ContractSpecs("EURUSD", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.00001, contract_size=100000.0, min_notional_usd=1.0, leverage=100.0),
+        "NASDAQ 100": ContractSpecs("NASDAQ 100", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
+        "S&P 500": ContractSpecs("S&P 500", min_volume=0.01, max_volume=10.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=1.0, leverage=50.0),
         # کریپتو فیوچرز (فقط در صورت اتصال API بایننس)
         "BTCUSDT": ContractSpecs("BTCUSDT", min_volume=0.001, max_volume=5.0, volume_step=0.001, tick_size=0.1, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
         "ETHUSDT": ContractSpecs("ETHUSDT", min_volume=0.01, max_volume=20.0, volume_step=0.01, tick_size=0.01, contract_size=1.0, min_notional_usd=5.0, leverage=20.0),
@@ -46,7 +45,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۵ - فیلتر نمادهای قابل معامله و همگام‌سازی کامل با اکسپرت)")
+        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۶ - اجرای همزمان روی همه اکانت‌ها، ریسک دقیق و ریسک‌فری خودکار)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -56,7 +55,7 @@ class AresMasterSystem:
         self.smc_engine = SMCICTStrategyEngine()
         self.setup_engine = MasterSetupEngine(min_rr_ratio=1.5)
 
-        self.risk_engine = RiskManagementPortfolioEngine(initial_capital=100.0)
+        self.user_risk_engines: Dict[str, RiskManagementPortfolioEngine] = {}
         self.trade_engine = TradePositionManagementEngine(mode=ExecutionMode.LIVE)
         self.last_scan_time: float = 0.0
         self.last_binance_sync_time: float = 0.0
@@ -66,6 +65,16 @@ class AresMasterSystem:
         self.symbol_last_candle_time: Dict[str, str] = {}
 
         self._restore_open_positions_from_db()
+
+    def _get_user_risk_engine(self, user_id: str, current_equity: float) -> RiskManagementPortfolioEngine:
+        """ایجاد یا بازیابی موتور ریسک کاملاً ایزوله برای هر کاربر جهت جلوگیری از تداخل سرمایه کاربران"""
+        eng = self.user_risk_engines.get(user_id)
+        if eng is None:
+            eng = RiskManagementPortfolioEngine(initial_capital=max(1.0, float(current_equity)))
+            self.user_risk_engines[user_id] = eng
+        else:
+            eng.current_capital = float(current_equity)
+        return eng
 
     def _restore_open_positions_from_db(self):
         try:
@@ -107,7 +116,6 @@ class AresMasterSystem:
                         if cid in self.trade_engine.open_positions:
                             del self.trade_engine.open_positions[cid]
 
-            # پاکسازی پوزیشن‌های بسته‌شده در MT5 یا بایننس از حافظه موقت موتور مدیریت
             db_open_ids = {str(r["trade_id"]) for r in self.db.get_all_open_trades()}
             for pos_id in list(self.trade_engine.open_positions.keys()):
                 if pos_id not in db_open_ids:
@@ -116,7 +124,7 @@ class AresMasterSystem:
             pass
 
     def manage_active_positions_fast(self):
-        """مدیریت همگام‌سازی پوزیشن‌های باز با صرافی/بروکر (سفارش‌های MT5 و بایننس دارای SL/TP بومی هستند)"""
+        """مدیریت همگام‌سازی پوزیشن‌های باز با صرافی/بروکر (ریسک‌فری و SL/TP متاتریدر داخل اکسپرت اجرا می‌شود)"""
         self._sync_binance_users_positions()
 
     @staticmethod
@@ -165,7 +173,7 @@ class AresMasterSystem:
         return False
 
     def scan_for_opportunities(self):
-        """اسکن بازار و ارسال سفارش با رعایت سقف ۳ معامله، تفکیک موجودی بروکرها و نسبت دقیق 1:1.5"""
+        """اسکن واحد بازار و ارسال همزمان سیگنال به تمام اکانت‌های متصل و دارای ظرفیت با محاسبه ریسک مستقل"""
         active_users = self.db.get_auto_trading_users()
         if not active_users:
             return
@@ -177,10 +185,11 @@ class AresMasterSystem:
         for k in expired_keys:
             del self.pending_trade_locks[k]
 
+        # ۱. آماده‌سازی لیست اکانت‌های متصل و دارای ظرفیت (کمتر از ۳ معامله باز/در صف)
+        eligible_users: List[Dict[str, Any]] = []
         for user in active_users:
             user_id = user["user_id"]
 
-            # دریافت مجزای موجودی زنده MT5 و بایننس برای جلوگیری از تداخل سرمایه
             mt5_equity, mt5_ok = 0.0, False
             if str(user.get("mt5_login", "")).strip():
                 mt5_equity, _, _, mt5_ok = account_config.fetch_user_live_balance(user)
@@ -196,163 +205,198 @@ class AresMasterSystem:
 
             is_mt5_connected = mt5_ok and mt5_equity > 0
             is_binance_connected = bin_ok and bin_equity > 0
-
             if not is_mt5_connected and not is_binance_connected:
                 continue
 
             target_keys = self._get_user_routing_keys(user_id)
-
-            # ۱. شمارش همزمان: پوزیشن‌های فعال ثبت‌شده + سفارشات معلق در صف
             active_trades_db = self.db.get_user_open_trades(user_id=user_id)
             pending_queue_count = account_config.get_user_pending_commands_count(target_keys)
-            total_in_flight = len(active_trades_db) + pending_queue_count
-
-            if total_in_flight >= 3:
+            if (len(active_trades_db) + pending_queue_count) >= 3:
                 continue
 
-            for symbol, specs in self.SYMBOLS_SPECS.items():
-                is_crypto = symbol in self.data_service.binance.CRYPTO_SYMBOLS
+            eligible_users.append({
+                "user": user,
+                "user_id": user_id,
+                "mt5_equity": mt5_equity,
+                "is_mt5_connected": is_mt5_connected,
+                "bin_equity": bin_equity,
+                "is_binance_connected": is_binance_connected,
+                "target_keys": target_keys,
+            })
 
-                if is_crypto and not is_binance_connected:
-                    continue
-                if not is_crypto and not is_mt5_connected:
-                    continue
+        if not eligible_users:
+            return
 
+        # ۲. اسکن واحد هر نماد و ارسال همزمان به تمام اکانت‌های واجد شرایط در همان لحظه
+        for symbol, specs in self.SYMBOLS_SPECS.items():
+            is_crypto = symbol in self.data_service.binance.CRYPTO_SYMBOLS
+            clean_sym = symbol.replace(" ", "").rstrip(".")
+
+            candidate_users: List[Dict[str, Any]] = []
+            for u_ctx in eligible_users:
+                user = u_ctx["user"]
+                user_id = u_ctx["user_id"]
+                target_keys = u_ctx["target_keys"]
+
+                if is_crypto and not u_ctx["is_binance_connected"]:
+                    continue
+                if not is_crypto and not u_ctx["is_mt5_connected"]:
+                    continue
                 if not is_crypto and not account_config.is_symbol_tradable_for_user(symbol, user):
                     continue
 
                 current_active = self.db.get_user_open_trades(user_id=user_id)
                 current_pending = account_config.get_user_pending_commands_count(target_keys)
                 if (len(current_active) + current_pending) >= 3:
-                    break
+                    continue
 
-                clean_sym = symbol.replace(" ", "").rstrip(".")
                 lock_key = f"{user_id}_{clean_sym}"
-
-                # ۲. بررسی قفل فوری حافظه
                 if lock_key in self.pending_trade_locks:
                     continue
 
-                # ۳. بررسی وجود پوزیشن باز در دیتابیس (با احتساب تمام نام‌های معادل بروکر)
                 if self._is_symbol_already_open(symbol, user, current_active):
                     continue
 
-                # ۴. بررسی وجود سفارش برای این نماد در صف متاتریدر
                 if not is_crypto:
                     broker_sym_check = account_config.resolve_broker_symbol(symbol, user)
                     if account_config.is_symbol_in_pending_queue(target_keys, broker_sym_check):
                         continue
 
-                news_status = self.news_filter.is_news_restricted(symbol)
-                if news_status["restricted"]:
-                    continue
+                candidate_users.append(u_ctx)
 
-                bundle = self.data_service.get_live_multitimeframe_bundle(symbol)
-                if not bundle:
-                    continue
+            if not candidate_users:
+                continue
 
-                # ۵. استراحت کندلی
-                last_candle = bundle["df_mtf"].iloc[-1]
-                candle_ts_str = str(last_candle.get("timestamp", ""))
+            news_status = self.news_filter.is_news_restricted(symbol)
+            if news_status["restricted"]:
+                continue
+
+            bundle = self.data_service.get_live_multitimeframe_bundle(symbol)
+            if not bundle:
+                continue
+
+            last_candle = bundle["df_mtf"].iloc[-1]
+            candle_ts_str = str(last_candle.get("timestamp", ""))
+
+            fresh_candidates = [
+                u_ctx for u_ctx in candidate_users
+                if self.symbol_last_candle_time.get(f"{u_ctx['user_id']}_{clean_sym}") != candle_ts_str
+            ]
+            if not fresh_candidates:
+                continue
+
+            current_price = bundle["current_price"]
+            market_type = bundle["market_type"]
+
+            crt_res = self.crt_engine.evaluate_crt_setup(
+                symbol, market_type, bundle["df_htf"], bundle["df_mtf"], bundle["df_ltf"]
+            )
+            smc_res = self.smc_engine.analyze_market(symbol, market_type, bundle["df_mtf"])
+
+            opportunity = self.setup_engine.evaluate_opportunity(
+                crt_res.to_dict(), smc_res.to_dict(), current_price, session_valid=True, in_news_window=False
+            )
+
+            self.db.record_setup_evaluation(opportunity.to_dict())
+
+            if opportunity.status != "APPROVED":
+                continue
+
+            sl_dist = round(abs(opportunity.entry_price - opportunity.stop_loss), 6)
+            tp_dist = round(sl_dist * 1.5, 6)
+
+            for u_ctx in fresh_candidates:
+                user = u_ctx["user"]
+                user_id = u_ctx["user_id"]
+                target_keys = u_ctx["target_keys"]
+                lock_key = f"{user_id}_{clean_sym}"
                 candle_key = f"{user_id}_{clean_sym}"
-                if self.symbol_last_candle_time.get(candle_key) == candle_ts_str:
+
+                # اطمینان مجدد از ظرفیت ۳ معامله قبل از ثبت سفارش
+                current_active = self.db.get_user_open_trades(user_id=user_id)
+                current_pending = account_config.get_user_pending_commands_count(target_keys)
+                if (len(current_active) + current_pending) >= 3:
                     continue
 
-                current_price = bundle["current_price"]
-                market_type = bundle["market_type"]
+                trade_equity = u_ctx["bin_equity"] if is_crypto else u_ctx["mt5_equity"]
+                user_risk_engine = self._get_user_risk_engine(user_id, trade_equity)
+                risk_decision = user_risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
 
-                crt_res = self.crt_engine.evaluate_crt_setup(
-                    symbol, market_type, bundle["df_htf"], bundle["df_mtf"], bundle["df_ltf"]
-                )
-                smc_res = self.smc_engine.analyze_market(symbol, market_type, bundle["df_mtf"])
+                if not risk_decision.approved:
+                    continue
 
-                opportunity = self.setup_engine.evaluate_opportunity(
-                    crt_res.to_dict(), smc_res.to_dict(), current_price, session_valid=True, in_news_window=False
-                )
+                vol = self._round_volume_to_step(risk_decision.calculated_volume, specs)
+                risk_usd = round(float(risk_decision.risk_amount_usd), 2)
 
-                self.db.record_setup_evaluation(opportunity.to_dict())
+                if is_crypto and u_ctx["is_binance_connected"]:
+                    res = account_config.execute_binance_order_detailed(
+                        user,
+                        symbol=symbol,
+                        side=opportunity.direction,
+                        volume=vol,
+                        stop_loss=opportunity.stop_loss,
+                        take_profit=opportunity.take_profit_1,
+                        sl_dist=sl_dist,
+                        tp_dist=tp_dist,
+                    )
+                    if res.get("success"):
+                        real_entry = float(res.get("entry_price") or opportunity.entry_price)
+                        real_sl = float(res.get("stop_loss") or opportunity.stop_loss)
+                        real_tp1 = float(res.get("take_profit") or opportunity.take_profit_1)
+                        exec_vol = float(res.get("volume") or vol)
+                        is_buy = opportunity.direction == "BUY"
+                        tp2 = (real_entry + (sl_dist * 2.5)) if is_buy else (real_entry - (sl_dist * 2.5))
+                        tp3 = (real_entry + (sl_dist * 4.0)) if is_buy else (real_entry - (sl_dist * 4.0))
 
-                if opportunity.status == "APPROVED":
-                    trade_equity = bin_equity if is_crypto else mt5_equity
-                    self.risk_engine.current_capital = trade_equity
-                    risk_decision = self.risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
+                        ok_pos, pos_obj, _ = self.trade_engine.open_position(
+                            symbol=symbol,
+                            market="CRYPTO_FUTURES",
+                            side_str=opportunity.direction,
+                            entry_price=real_entry,
+                            stop_loss=real_sl,
+                            tp1=real_tp1,
+                            tp2=tp2,
+                            tp3=tp3,
+                            allocated_volume=exec_vol,
+                            risk_usd=risk_usd,
+                            user_id=user_id,
+                            mt5_ticket=0,
+                        )
+                        if ok_pos and pos_obj:
+                            old_id = pos_obj.position_id
+                            bin_id = f"BIN_{res.get('order_id', old_id)}"
+                            pos_obj.position_id = bin_id
+                            self.trade_engine.open_positions[bin_id] = self.trade_engine.open_positions.pop(old_id)
+                            self.db.record_new_trade(pos_obj.to_dict(), user_id=user_id)
 
-                    if risk_decision.approved:
-                        vol = self._round_volume_to_step(risk_decision.calculated_volume, specs)
+                        self.pending_trade_locks[lock_key] = time.time()
+                        self.symbol_last_candle_time[candle_key] = candle_ts_str
+                        print(
+                            f"\n🚀 [سفارش بایننس اجرا شد | کاربر {user.get('identifier')}]: {symbol} | ریسک: ${risk_usd}",
+                            flush=True,
+                        )
+                else:
+                    broker_symbol = account_config.resolve_broker_symbol(symbol, user)
 
-                        # محاسبه دقیق فواصل SL و TP برای تضمین ۱۰۰٪ نسبت 1:1.5 روی قیمت واقعی صرافی/بروکر
-                        sl_dist = round(abs(opportunity.entry_price - opportunity.stop_loss), 6)
-                        tp_dist = round(sl_dist * 1.5, 6)
+                    queued = account_config.queue_mt5_command(target_keys, {
+                        "action": opportunity.direction,
+                        "symbol": broker_symbol,
+                        "volume": vol,
+                        "sl": round(opportunity.stop_loss, 5),
+                        "tp": round(opportunity.take_profit_1, 5),
+                        "sl_dist": sl_dist,
+                        "tp_dist": tp_dist,
+                        "risk_usd": risk_usd,
+                    }, user_cfg=user)
 
-                        if is_crypto and is_binance_connected:
-                            res = account_config.execute_binance_order_detailed(
-                                user,
-                                symbol=symbol,
-                                side=opportunity.direction,
-                                volume=vol,
-                                stop_loss=opportunity.stop_loss,
-                                take_profit=opportunity.take_profit_1,
-                                sl_dist=sl_dist,
-                                tp_dist=tp_dist,
-                            )
-                            if res.get("success"):
-                                real_entry = float(res.get("entry_price") or opportunity.entry_price)
-                                real_sl = float(res.get("stop_loss") or opportunity.stop_loss)
-                                real_tp1 = float(res.get("take_profit") or opportunity.take_profit_1)
-                                exec_vol = float(res.get("volume") or vol)
-                                is_buy = opportunity.direction == "BUY"
-                                tp2 = (real_entry + (sl_dist * 2.5)) if is_buy else (real_entry - (sl_dist * 2.5))
-                                tp3 = (real_entry + (sl_dist * 4.0)) if is_buy else (real_entry - (sl_dist * 4.0))
+                    if queued:
+                        self.pending_trade_locks[lock_key] = time.time()
+                        self.symbol_last_candle_time[candle_key] = candle_ts_str
 
-                                ok_pos, pos_obj, _ = self.trade_engine.open_position(
-                                    symbol=symbol,
-                                    market="CRYPTO_FUTURES",
-                                    side_str=opportunity.direction,
-                                    entry_price=real_entry,
-                                    stop_loss=real_sl,
-                                    tp1=real_tp1,
-                                    tp2=tp2,
-                                    tp3=tp3,
-                                    allocated_volume=exec_vol,
-                                    risk_usd=risk_decision.risk_amount_usd,
-                                    user_id=user_id,
-                                    mt5_ticket=0,
-                                )
-                                if ok_pos and pos_obj:
-                                    old_id = pos_obj.position_id
-                                    bin_id = f"BIN_{res.get('order_id', old_id)}"
-                                    pos_obj.position_id = bin_id
-                                    self.trade_engine.open_positions[bin_id] = self.trade_engine.open_positions.pop(old_id)
-                                    self.db.record_new_trade(pos_obj.to_dict(), user_id=user_id)
-
-                                self.pending_trade_locks[lock_key] = time.time()
-                                self.symbol_last_candle_time[candle_key] = candle_ts_str
-                                print(
-                                    f"\n🚀 [سفارش بایننس اجرا و در دیتابیس ثبت شد]: {symbol} | شناسه: {res.get('order_id')} | "
-                                    f"ورود: {real_entry} | SL: {real_sl} | TP: {real_tp1}",
-                                    flush=True,
-                                )
-                        else:
-                            broker_symbol = account_config.resolve_broker_symbol(symbol, user)
-
-                            queued = account_config.queue_mt5_command(target_keys, {
-                                "action": opportunity.direction,
-                                "symbol": broker_symbol,
-                                "volume": vol,
-                                "sl": round(opportunity.stop_loss, 5),
-                                "tp": round(opportunity.take_profit_1, 5),
-                                "sl_dist": sl_dist,
-                                "tp_dist": tp_dist,
-                            }, user_cfg=user)
-
-                            if queued:
-                                self.pending_trade_locks[lock_key] = time.time()
-                                self.symbol_last_candle_time[candle_key] = candle_ts_str
-
-                                print("\n📡 [سیگنال تایید شد -> ارسال ۱ معامله امن با نسبت دقیق 1:1.5 به متاتریدر ۵]:", flush=True)
-                                print(f"   نماد بروکر: {broker_symbol} | جهت: {opportunity.direction} | حجم امن: {vol} لات", flush=True)
-                                print(f"   فاصله SL: {sl_dist} | فاصله TP (1:1.5): {tp_dist}", flush=True)
-                                print(f"   🔒 قفل حفاظتی نماد {broker_symbol} برای ۱۵ دقیقه فعال شد.", flush=True)
+                        print(
+                            f"\n📡 [ارسال همزمان به متاتریدر {user.get('mt5_login')}]: {broker_symbol} | {opportunity.direction} | ریسک دلاری: ${risk_usd} | نسبت 1:1.5",
+                            flush=True,
+                        )
 
     def run_loop(self):
         print("\n🚀 ناظر هوشمند ۲۴ ساعته (حالت معاملات ۱۰۰٪ واقعی، کنترل سقف ۳ پوزیشن) فعال شد.\n", flush=True)
