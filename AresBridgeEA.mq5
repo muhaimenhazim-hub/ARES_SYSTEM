@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V14.6 |
-//|  VERIFIED TRADABLE SYMBOLS, TRADE-MODE GATE & CLOUD FILE BRIDGE  |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V14.7 |
+//|  STRICT SPX/NDX INDEX FILTER, TRADE-MODE GATE & CLOUD BRIDGE     |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "14.60"
+#property version   "14.70"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V14.6 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
+   Print("🚀 ARES Bridge V14.7 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, "). Syncing with: ", InpServerURL);
    SyncAccountWithServer();
    return(INIT_SUCCEEDED);
 }
@@ -80,9 +80,9 @@ string ResolveBrokerSymbol(string rawSymbol)
    // ۱. پشتیبانی ویژه از نام‌های متفاوت شاخص NASDAQ 100 در بروکرها
    if(cleanUpper == "NAS100" || cleanUpper == "NASDAQ100" || cleanUpper == "NASDAQ" ||
       cleanUpper == "USTEC" || cleanUpper == "US100" || cleanUpper == "NDX100" ||
-      cleanUpper == "NDX" || cleanUpper == "NQ")
+      cleanUpper == "NDXUSD" || cleanUpper == "NDX" || cleanUpper == "NQ")
    {
-      string nasCandidates[13];
+      string nasCandidates[15];
       nasCandidates[0]  = rawSymbol;
       nasCandidates[1]  = "NAS100.";
       nasCandidates[2]  = "NAS100";
@@ -90,14 +90,16 @@ string ResolveBrokerSymbol(string rawSymbol)
       nasCandidates[4]  = "USTEC";
       nasCandidates[5]  = "US100.";
       nasCandidates[6]  = "US100";
-      nasCandidates[7]  = "NDX100";
-      nasCandidates[8]  = "NDX";
-      nasCandidates[9]  = "US100Cash";
-      nasCandidates[10] = "NAS100_i";
-      nasCandidates[11] = "NAS100m";
-      nasCandidates[12] = "NASDAQ";
+      nasCandidates[7]  = "NDXUSD.";
+      nasCandidates[8]  = "NDXUSD";
+      nasCandidates[9]  = "NDX100";
+      nasCandidates[10] = "NDX";
+      nasCandidates[11] = "US100Cash";
+      nasCandidates[12] = "NAS100_i";
+      nasCandidates[13] = "NAS100m";
+      nasCandidates[14] = "NASDAQ";
 
-      for(int i = 0; i < 13; i++)
+      for(int i = 0; i < 15; i++)
       {
          if(TryActivateSymbol(nasCandidates[i])) return nasCandidates[i];
       }
@@ -108,8 +110,11 @@ string ResolveBrokerSymbol(string rawSymbol)
          string symName = SymbolName(i, false);
          string symUpper = symName;
          StringToUpper(symUpper);
+         bool isNdxMatch = (symUpper == "NDX" || StringFind(symUpper, "NDX.") == 0 ||
+                            StringFind(symUpper, "NDX_") == 0 || StringFind(symUpper, "NDX100") == 0 ||
+                            StringFind(symUpper, "NDXUSD") == 0);
          if(StringFind(symUpper, "NAS100") == 0 || StringFind(symUpper, "USTEC") == 0 ||
-            StringFind(symUpper, "US100") == 0 || StringFind(symUpper, "NDX") == 0 ||
+            StringFind(symUpper, "US100") == 0 || isNdxMatch ||
             StringFind(symUpper, "NASDAQ") == 0)
          {
             if(TryActivateSymbol(symName)) return symName;
@@ -120,9 +125,9 @@ string ResolveBrokerSymbol(string rawSymbol)
 
    // ۲. پشتیبانی ویژه از نام‌های متفاوت شاخص S&P 500 در بروکرها
    if(cleanUpper == "US500" || cleanUpper == "SP500" || cleanUpper == "SPX500" ||
-      cleanUpper == "SPX" || cleanUpper == "S&P500" || cleanUpper == "ES")
+      cleanUpper == "SPXUSD" || cleanUpper == "SPX" || cleanUpper == "S&P500" || cleanUpper == "ES")
    {
-      string spCandidates[11];
+      string spCandidates[13];
       spCandidates[0]  = rawSymbol;
       spCandidates[1]  = "US500.";
       spCandidates[2]  = "US500";
@@ -130,12 +135,14 @@ string ResolveBrokerSymbol(string rawSymbol)
       spCandidates[4]  = "SP500";
       spCandidates[5]  = "SPX500.";
       spCandidates[6]  = "SPX500";
-      spCandidates[7]  = "SPX";
-      spCandidates[8]  = "US500Cash";
-      spCandidates[9]  = "US500_i";
-      spCandidates[10] = "US500m";
+      spCandidates[7]  = "SPXUSD.";
+      spCandidates[8]  = "SPXUSD";
+      spCandidates[9]  = "SPX";
+      spCandidates[10] = "US500Cash";
+      spCandidates[11] = "US500_i";
+      spCandidates[12] = "US500m";
 
-      for(int i = 0; i < 11; i++)
+      for(int i = 0; i < 13; i++)
       {
          if(TryActivateSymbol(spCandidates[i])) return spCandidates[i];
       }
@@ -146,8 +153,11 @@ string ResolveBrokerSymbol(string rawSymbol)
          string symName = SymbolName(i, false);
          string symUpper = symName;
          StringToUpper(symUpper);
+         bool isSpxMatch = (symUpper == "SPX" || StringFind(symUpper, "SPX.") == 0 ||
+                            StringFind(symUpper, "SPX_") == 0 || StringFind(symUpper, "SPX500") == 0 ||
+                            StringFind(symUpper, "SPXUSD") == 0);
          if(StringFind(symUpper, "US500") == 0 || StringFind(symUpper, "SP500") == 0 ||
-            StringFind(symUpper, "SPX500") == 0 || StringFind(symUpper, "SPX") == 0)
+            StringFind(symUpper, "SPX500") == 0 || isSpxMatch)
          {
             if(TryActivateSymbol(symName)) return symName;
          }
@@ -210,7 +220,10 @@ string BuildActiveSymbolsJson()
       string upper = symName;
       StringToUpper(upper);
 
-      bool isGoldAlias = (upper == "GOLD" || upper == "GOLD." || upper == "GOLDM" || StringFind(upper, "GOLD.") == 0);
+      bool isGoldAlias = (upper == "GOLD" || upper == "GOLD." || upper == "GOLDM" || StringFind(upper, "GOLD.") == 0 || StringFind(upper, "GOLD_") == 0);
+      bool isNdxAlias  = (upper == "NDX" || StringFind(upper, "NDX.") == 0 || StringFind(upper, "NDX_") == 0 || StringFind(upper, "NDX100") == 0 || StringFind(upper, "NDXUSD") == 0);
+      bool isSpxAlias  = (upper == "SPX" || StringFind(upper, "SPX.") == 0 || StringFind(upper, "SPX_") == 0 || StringFind(upper, "SPX500") == 0 || StringFind(upper, "SPXUSD") == 0);
+
       bool relevant = (
          StringFind(upper, "EURUSD") == 0 ||
          StringFind(upper, "XAUUSD") == 0 ||
@@ -218,10 +231,10 @@ string BuildActiveSymbolsJson()
          StringFind(upper, "NAS100") == 0 ||
          StringFind(upper, "USTEC") == 0 ||
          StringFind(upper, "US100") == 0 ||
-         StringFind(upper, "NDX") == 0 ||
+         isNdxAlias ||
          StringFind(upper, "US500") == 0 ||
          StringFind(upper, "SP500") == 0 ||
-         StringFind(upper, "SPX") == 0
+         isSpxAlias
       );
 
       if(!relevant) continue;

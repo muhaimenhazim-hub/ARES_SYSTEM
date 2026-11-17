@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.6 (VERIFIED TRADABLE SYMBOLS CHECK, STALE GUARD & BINANCE TTL)
+VERSION: 14.7 (STRICT SPX/NDX/GOLD MATCHING AGAINST ETF FALSE POSITIVES)
 ================================================================================
 """
 
@@ -28,13 +28,48 @@ BROKER_SYMBOL_ALIASES = {
     "XAUUSD": ["XAUUSD.", "XAUUSD", "GOLD", "GOLD.", "XAUUSD_i", "XAUUSDm", "GOLDm", "XAUUSD.a"],
     "NASDAQ 100": [
         "NAS100", "NAS100.", "USTEC", "USTEC.", "US100", "US100.",
-        "NDX100", "NDX", "US100Cash", "NAS100_i", "NAS100m", "NQ", "NQ=F", "NASDAQ",
+        "NDX100", "NDXUSD", "NDXUSD.", "NDX", "US100Cash", "NAS100_i", "NAS100m", "NQ", "NQ=F", "NASDAQ",
     ],
     "S&P 500": [
         "US500", "US500.", "SP500", "SP500.", "SPX500", "SPX500.",
-        "SPX", "US500Cash", "US500_i", "US500m", "ES", "ES=F",
+        "SPXUSD", "SPXUSD.", "SPX", "US500Cash", "US500_i", "US500m", "ES", "ES=F",
     ],
 }
+
+
+def _symbol_matches_alias(broker_sym: str, alias: str, allow_prefix: bool = True) -> bool:
+    """تطبیق دقیق نماد بروکر بدون اشتباه گرفتن ETFهایی مثل SPXC/SPXL با شاخص S&P 500 یا NASDAQ"""
+    su = str(broker_sym).strip().upper()
+    au = str(alias).strip().upper()
+    ac = au.rstrip(".")
+    if not su or not ac:
+        return False
+    if su == au or su.rstrip(".") == ac:
+        return True
+    if not allow_prefix or len(ac) < 3:
+        return False
+    if ac in ("SPX", "NDX"):
+        if not su.startswith(ac) or len(su) <= len(ac):
+            return False
+        rest = su[len(ac):]
+        return (
+            rest[0] in (".", "_", "-", "/")
+            or rest[0].isdigit()
+            or rest.startswith("USD")
+            or rest.startswith("EUR")
+            or rest.startswith("CASH")
+            or rest.startswith("MINI")
+        )
+    if ac == "GOLD":
+        if not su.startswith("GOLD") or len(su) <= 4:
+            return False
+        rest = su[4:]
+        return (
+            rest[0] in (".", "_", "-", "/")
+            or rest in ("M", "I", "PRO", "RAW", "MICRO", "MINI", "CASH")
+            or rest.startswith("USD")
+        )
+    return su.startswith(ac)
 
 
 def _load_json_file(file_path: str) -> Dict[str, Any]:
@@ -181,11 +216,8 @@ def is_symbol_tradable_for_user(canonical_symbol: str, user_cfg: Optional[Dict[s
     clean_sym = canonical_symbol.strip()
     aliases = BROKER_SYMBOL_ALIASES.get(clean_sym, [clean_sym])
     for alias in aliases:
-        alias_upper = alias.upper()
-        alias_clean = alias.rstrip(".").upper()
         for s in active_syms:
-            su = str(s).strip().upper()
-            if su == alias_upper or (len(alias_clean) >= 3 and su.startswith(alias_clean)):
+            if _symbol_matches_alias(str(s), alias, allow_prefix=True):
                 return True
     return False
 
@@ -210,18 +242,14 @@ def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, An
 
         # ۱. تطبیق دقیق (حساس به حروف بزرگ/کوچک نیست)
         for alias in aliases:
-            alias_upper = alias.upper()
             for s in known_symbols:
-                if s.upper() == alias_upper:
+                if _symbol_matches_alias(s, alias, allow_prefix=False):
                     return s
 
-        # ۲. تطبیق پیشوندی (برای نمادهایی با پسوندهای خاص مثل NAS100.c یا USTEC_ecn)
+        # ۲. تطبیق پیشوندی ایمن (برای نمادهایی با پسوندهای خاص مثل NAS100.c یا SPXUSD.)
         for alias in aliases:
-            alias_clean = alias.rstrip(".").upper()
-            if len(alias_clean) < 3:
-                continue
             for s in known_symbols:
-                if s.upper().startswith(alias_clean):
+                if _symbol_matches_alias(s, alias, allow_prefix=True):
                     return s
 
         broker_name = str(bridge.get("broker", "")).lower()
