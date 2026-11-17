@@ -2,15 +2,16 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 14.4 (CLEAN BROKER DISCONNECT/SWITCH, MT5 + BINANCE LIVE SYNC)
+VERSION: 14.5 (SESSION TOKENS, PERSISTENT DAILY/DRAWDOWN RISK GUARD & LIVE SYNC)
 ================================================================================
 """
 
 import hashlib
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +50,29 @@ class AresDatabaseManager:
                     identifier TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     created_at DATETIME NOT NULL
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    token TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_risk_state (
+                    state_key TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    utc_date TEXT NOT NULL,
+                    daily_start_equity REAL NOT NULL,
+                    peak_equity REAL NOT NULL,
+                    is_halted INTEGER DEFAULT 0,
+                    halt_reason TEXT DEFAULT '',
+                    updated_at DATETIME NOT NULL
                 );
             """)
 
@@ -127,12 +151,57 @@ class AresDatabaseManager:
             """)
 
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_identifier ON users(identifier);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_risk_state_user ON user_risk_state(user_id);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticket ON trades(mt5_ticket);")
 
     @staticmethod
     def _hash_pw(password: str) -> str:
         return hashlib.sha256(password.strip().encode()).hexdigest()
+
+    def create_session_token(self, user_id: str, ttl_days: int = 30) -> str:
+        token = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(days=ttl_days)
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO user_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?);",
+                (token, user_id, now.isoformat(), expires.isoformat()),
+            )
+        return token
+
+    def validate_session_token(self, token: str) -> Optional[str]:
+        clean_tok = str(token or "").strip()
+        if not clean_tok:
+            return None
+        now = datetime.now(timezone.utc)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_id, expires_at FROM user_sessions WHERE token = ?;",
+                (clean_tok,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            try:
+                exp = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if now > exp:
+                    conn.execute("DELETE FROM user_sessions WHERE token = ?;", (clean_tok,))
+                    return None
+            except Exception:
+                return None
+            return str(row["user_id"])
+
+    def delete_session_token(self, token: str) -> None:
+        clean_tok = str(token or "").strip()
+        if not clean_tok:
+            return
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM user_sessions WHERE token = ?;", (clean_tok,))
 
     def register_user(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
         clean_id = identifier.strip().lower()
@@ -151,7 +220,8 @@ class AresDatabaseManager:
                     "INSERT INTO user_broker_configs (user_id, updated_at) VALUES (?, ?);",
                     (user_id, now),
                 )
-                return {"user_id": user_id, "identifier": clean_id}
+            token = self.create_session_token(user_id)
+            return {"user_id": user_id, "identifier": clean_id, "token": token}
         except sqlite3.IntegrityError:
             return None
 
@@ -165,7 +235,11 @@ class AresDatabaseManager:
                 (clean_id, pw_hash),
             )
             row = cursor.fetchone()
-            return dict(row) if row else None
+            user = dict(row) if row else None
+        if not user:
+            return None
+        user["token"] = self.create_session_token(user["user_id"])
+        return user
 
     def get_user_by_identifier_or_login(self, identifier: str = "", mt5_login: str = "") -> Optional[Dict[str, Any]]:
         clean_id = str(identifier).strip().lower()
@@ -263,6 +337,7 @@ class AresDatabaseManager:
                     SET status = 'CLOSED', closed_at = ?, exit_reason = 'BROKER_CHANGED'
                     WHERE user_id = ? AND status = 'OPEN' AND market = 'FOREX_OR_INDICES';
                 """, (now, user_id))
+                cursor.execute("DELETE FROM user_risk_state WHERE user_id = ? AND state_key LIKE ?;", (user_id, f"{user_id}_mt5%"))
 
             if old_b_key and new_b_key != old_b_key:
                 cursor.execute("""
@@ -270,6 +345,7 @@ class AresDatabaseManager:
                     SET status = 'CLOSED', closed_at = ?, exit_reason = 'BROKER_CHANGED'
                     WHERE user_id = ? AND status = 'OPEN' AND market = 'CRYPTO_FUTURES';
                 """, (now, user_id))
+                cursor.execute("DELETE FROM user_risk_state WHERE user_id = ? AND state_key LIKE ?;", (user_id, f"{user_id}_bin%"))
 
     def toggle_auto_trading(self, user_id: str) -> bool:
         with self._get_connection() as conn:
@@ -294,6 +370,94 @@ class AresDatabaseManager:
                 SET status = 'CLOSED', closed_at = ?, exit_reason = 'USER_DISCONNECTED'
                 WHERE user_id = ? AND status = 'OPEN';
             """, (now, user_id))
+            cursor.execute("DELETE FROM user_risk_state WHERE user_id = ?;", (user_id,))
+
+    def sync_and_check_user_risk_limits(
+        self,
+        state_key: str,
+        user_id: str,
+        current_equity: float,
+        max_daily_loss_pct: float = 3.0,
+        max_drawdown_pct: float = 12.0,
+        loss_throttle_pct: float = 2.0,
+    ) -> Dict[str, Any]:
+        """ردیابی واقعی ضرر روزانه (۳٪) و افت سرمایه از سقف (۱۲٪) به ازای هر حساب در دیتابیس"""
+        eq = float(current_equity or 0.0)
+        if eq <= 0.0:
+            return {"allowed": False, "throttled": False, "daily_loss_pct": 0.0, "drawdown_pct": 0.0, "reason": "موجودی نامعتبر"}
+
+        now_dt = datetime.now(timezone.utc)
+        today_utc = now_dt.strftime("%Y-%m-%d")
+        now_iso = now_dt.isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM user_risk_state WHERE state_key = ?;", (state_key,))
+            row = cursor.fetchone()
+
+            if row is None:
+                daily_start = eq
+                peak_eq = eq
+                is_halted = 0
+                halt_reason = ""
+            else:
+                daily_start = float(row["daily_start_equity"] or eq)
+                peak_eq = float(row["peak_equity"] or eq)
+                is_halted = int(row["is_halted"] or 0)
+                halt_reason = str(row["halt_reason"] or "")
+
+                if str(row["utc_date"]) != today_utc:
+                    daily_start = eq
+                if eq > peak_eq:
+                    peak_eq = eq
+
+            daily_loss_pct = max(0.0, ((daily_start - eq) / daily_start) * 100.0) if daily_start > 0 else 0.0
+            drawdown_pct = max(0.0, ((peak_eq - eq) / peak_eq) * 100.0) if peak_eq > 0 else 0.0
+
+            if not is_halted and drawdown_pct >= max_drawdown_pct:
+                is_halted = 1
+                halt_reason = f"افت سرمایه بحرانی ({drawdown_pct:.2f}٪) به سقف مجاز {max_drawdown_pct:.1f}٪ رسید."
+
+            cursor.execute("""
+                INSERT INTO user_risk_state (
+                    state_key, user_id, utc_date, daily_start_equity, peak_equity, is_halted, halt_reason, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    utc_date = excluded.utc_date,
+                    daily_start_equity = excluded.daily_start_equity,
+                    peak_equity = excluded.peak_equity,
+                    is_halted = excluded.is_halted,
+                    halt_reason = excluded.halt_reason,
+                    updated_at = excluded.updated_at;
+            """, (state_key, user_id, today_utc, daily_start, peak_eq, is_halted, halt_reason, now_iso))
+
+        if is_halted:
+            return {
+                "allowed": False,
+                "throttled": True,
+                "daily_loss_pct": round(daily_loss_pct, 2),
+                "drawdown_pct": round(drawdown_pct, 2),
+                "reason": halt_reason,
+            }
+
+        if daily_loss_pct >= max_daily_loss_pct:
+            return {
+                "allowed": False,
+                "throttled": True,
+                "daily_loss_pct": round(daily_loss_pct, 2),
+                "drawdown_pct": round(drawdown_pct, 2),
+                "reason": f"سقف زیان روزانه ({daily_loss_pct:.2f}٪ / {max_daily_loss_pct:.1f}٪) تکمیل شد.",
+            }
+
+        return {
+            "allowed": True,
+            "throttled": daily_loss_pct >= loss_throttle_pct,
+            "daily_loss_pct": round(daily_loss_pct, 2),
+            "drawdown_pct": round(drawdown_pct, 2),
+            "daily_start_equity": daily_start,
+            "peak_equity": peak_eq,
+            "reason": "",
+        }
 
     def get_auto_trading_users(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -358,7 +522,7 @@ class AresDatabaseManager:
                 if row:
                     cursor.execute("""
                         UPDATE trades
-                        SET current_volume = ?, stop_loss = ?, tp1 = ?, realized_pnl = ?, status = 'OPEN'
+                        SET current_volume = ?, stop_loss = ?, tp1 = ?, realized_pnl = ?, status = 'OPEN', closed_at = NULL, exit_reason = NULL
                         WHERE trade_id = ?;
                     """, (vol, sl, tp, profit, row["trade_id"]))
                 else:
@@ -409,7 +573,7 @@ class AresDatabaseManager:
                     p = live_by_sym[sym_clean]
                     cursor.execute("""
                         UPDATE trades
-                        SET current_volume = ?, realized_pnl = ?, status = 'OPEN'
+                        SET current_volume = ?, realized_pnl = ?, status = 'OPEN', closed_at = NULL, exit_reason = NULL
                         WHERE trade_id = ?;
                     """, (float(p.get("volume", 0.0)), float(p.get("unrealized_pnl", 0.0)), row["trade_id"]))
                 else:
@@ -419,7 +583,6 @@ class AresDatabaseManager:
                     """, (now, row["trade_id"]))
                     closed_trade_ids.append(row["trade_id"])
 
-            # ثبت پوزیشن باز روی بایننس در صورتی که قبلاً در دیتابیس نبود
             for sym_clean, p in live_by_sym.items():
                 if sym_clean not in tracked_syms:
                     trade_id = f"BIN_SYNC_{sym_clean}_{int(datetime.now(timezone.utc).timestamp())}"

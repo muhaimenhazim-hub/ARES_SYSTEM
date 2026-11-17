@@ -2,10 +2,11 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 14.6 (SIMULTANEOUS MULTI-ACCOUNT EXECUTION, PER-USER RISK & EXACT RISK_USD)
+VERSION: 14.7 (22H SESSION FILTER, REAL 3% DAILY / 12% DRAWDOWN RISK GUARD)
 ================================================================================
 """
 
+from datetime import datetime, timezone
 import sys
 import time
 from typing import Any, Dict, List
@@ -45,7 +46,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۶ - اجرای همزمان روی همه اکانت‌ها، ریسک دقیق و ریسک‌فری خودکار)")
+        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۷ - سشن ۲۲ ساعته، قفل ۳٪ ضرر روزانه و ۱۲٪ افت سرمایه)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -60,11 +61,27 @@ class AresMasterSystem:
         self.last_scan_time: float = 0.0
         self.last_binance_sync_time: float = 0.0
 
-        # قفل‌های حافظه بلادرنگ جهت مهار ۱۰۰٪ تاخیر پاسخ متاتریدر/صرافی
         self.pending_trade_locks: Dict[str, float] = {}
         self.symbol_last_candle_time: Dict[str, str] = {}
+        self._risk_alert_last_ts: Dict[str, float] = {}
 
         self._restore_open_positions_from_db()
+
+    @staticmethod
+    def is_forex_session_open() -> bool:
+        """فیلتر ۲۲ ساعته معاملاتی: توقف در ۲ ساعت رول‌اور شبانه (21:00 تا 23:00 UTC) و تعطیلات پایان هفته"""
+        utc_now = datetime.now(timezone.utc)
+        if utc_now.weekday() in (5, 6):
+            return False
+        if 21 <= utc_now.hour < 23:
+            return False
+        return True
+
+    def _log_risk_alert_throttled(self, key: str, message: str, cooldown: float = 300.0):
+        now = time.time()
+        if now - self._risk_alert_last_ts.get(key, 0.0) >= cooldown:
+            self._risk_alert_last_ts[key] = now
+            print(message, flush=True)
 
     def _get_user_risk_engine(self, user_id: str, current_equity: float) -> RiskManagementPortfolioEngine:
         """ایجاد یا بازیابی موتور ریسک کاملاً ایزوله برای هر کاربر جهت جلوگیری از تداخل سرمایه کاربران"""
@@ -173,25 +190,25 @@ class AresMasterSystem:
         return False
 
     def scan_for_opportunities(self):
-        """اسکن واحد بازار و ارسال همزمان سیگنال به تمام اکانت‌های متصل و دارای ظرفیت با محاسبه ریسک مستقل"""
+        """اسکن واحد بازار و ارسال همزمان سیگنال به تمام اکانت‌های متصل و دارای ظرفیت با کنترل ریسک روزانه و افت سرمایه"""
         active_users = self.db.get_auto_trading_users()
         if not active_users:
             return
 
         now_ts = time.time()
+        forex_session_open = self.is_forex_session_open()
 
-        # پاکسازی خودکار قفل‌های منقضی شده بعد از ۱۵ دقیقه (۹۰۰ ثانیه)
         expired_keys = [k for k, t in self.pending_trade_locks.items() if now_ts - t > 900.0]
         for k in expired_keys:
             del self.pending_trade_locks[k]
 
-        # ۱. آماده‌سازی لیست اکانت‌های متصل و دارای ظرفیت (کمتر از ۳ معامله باز/در صف)
         eligible_users: List[Dict[str, Any]] = []
         for user in active_users:
             user_id = user["user_id"]
+            m_login = str(user.get("mt5_login", "")).strip()
 
             mt5_equity, mt5_ok = 0.0, False
-            if str(user.get("mt5_login", "")).strip():
+            if m_login:
                 mt5_equity, _, _, mt5_ok = account_config.fetch_user_live_balance(user)
 
             bin_equity, bin_ok = 0.0, False
@@ -205,6 +222,29 @@ class AresMasterSystem:
 
             is_mt5_connected = mt5_ok and mt5_equity > 0
             is_binance_connected = bin_ok and bin_equity > 0
+
+            mt5_risk_state = {"allowed": False, "daily_loss_pct": 0.0}
+            if is_mt5_connected:
+                mt5_state_key = f"{user_id}_mt5_{m_login}"
+                mt5_risk_state = self.db.sync_and_check_user_risk_limits(mt5_state_key, user_id, mt5_equity)
+                if not mt5_risk_state["allowed"]:
+                    self._log_risk_alert_throttled(
+                        mt5_state_key,
+                        f"🛡️ [قفل محافظتی ریسک | متاتریدر {m_login}]: {mt5_risk_state['reason']}",
+                    )
+                    is_mt5_connected = False
+
+            bin_risk_state = {"allowed": False, "daily_loss_pct": 0.0}
+            if is_binance_connected:
+                bin_state_key = f"{user_id}_bin"
+                bin_risk_state = self.db.sync_and_check_user_risk_limits(bin_state_key, user_id, bin_equity)
+                if not bin_risk_state["allowed"]:
+                    self._log_risk_alert_throttled(
+                        bin_state_key,
+                        f"🛡️ [قفل محافظتی ریسک | بایننس کاربر {user.get('identifier')}]: {bin_risk_state['reason']}",
+                    )
+                    is_binance_connected = False
+
             if not is_mt5_connected and not is_binance_connected:
                 continue
 
@@ -219,17 +259,21 @@ class AresMasterSystem:
                 "user_id": user_id,
                 "mt5_equity": mt5_equity,
                 "is_mt5_connected": is_mt5_connected,
+                "mt5_daily_loss_pct": float(mt5_risk_state.get("daily_loss_pct", 0.0)),
                 "bin_equity": bin_equity,
                 "is_binance_connected": is_binance_connected,
+                "bin_daily_loss_pct": float(bin_risk_state.get("daily_loss_pct", 0.0)),
                 "target_keys": target_keys,
             })
 
         if not eligible_users:
             return
 
-        # ۲. اسکن واحد هر نماد و ارسال همزمان به تمام اکانت‌های واجد شرایط در همان لحظه
         for symbol, specs in self.SYMBOLS_SPECS.items():
             is_crypto = symbol in self.data_service.binance.CRYPTO_SYMBOLS
+            if not is_crypto and not forex_session_open:
+                continue
+
             clean_sym = symbol.replace(" ", "").rstrip(".")
 
             candidate_users: List[Dict[str, Any]] = []
@@ -312,14 +356,17 @@ class AresMasterSystem:
                 lock_key = f"{user_id}_{clean_sym}"
                 candle_key = f"{user_id}_{clean_sym}"
 
-                # اطمینان مجدد از ظرفیت ۳ معامله قبل از ثبت سفارش
                 current_active = self.db.get_user_open_trades(user_id=user_id)
                 current_pending = account_config.get_user_pending_commands_count(target_keys)
                 if (len(current_active) + current_pending) >= 3:
                     continue
 
                 trade_equity = u_ctx["bin_equity"] if is_crypto else u_ctx["mt5_equity"]
+                daily_loss_pct = u_ctx["bin_daily_loss_pct"] if is_crypto else u_ctx["mt5_daily_loss_pct"]
                 user_risk_engine = self._get_user_risk_engine(user_id, trade_equity)
+                user_risk_engine.daily_realized_pnl = -(trade_equity * (daily_loss_pct / 100.0))
+                user_risk_engine.daily_fees_paid = 0.0
+
                 risk_decision = user_risk_engine.validate_risk_gate(opportunity.to_dict(), specs=specs)
 
                 if not risk_decision.approved:

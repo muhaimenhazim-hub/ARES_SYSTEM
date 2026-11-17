@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 14.7 (CLEAN CACHE PURGE ON DISCONNECT/SWITCH, LOGIN=0 GUARD & PRICE PRECISION)
+VERSION: 14.8 (SECURE SESSION TOKEN AUTH, CLEAN CACHE PURGE & PRICE PRECISION)
 ================================================================================
 """
 
@@ -39,6 +39,15 @@ def get_local_ip():
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def _require_auth_user(x_auth_token: Optional[str]) -> str:
+    if not x_auth_token:
+        raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
+    user_id = db.validate_session_token(x_auth_token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="نشست کاربری نامعتبر یا منقضی شده است.")
+    return user_id
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -122,7 +131,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
                 <h1 class="text-2xl font-black text-white tracking-wider flex items-center justify-center gap-2">
                     <span>ARES AI</span>
-                    <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">V14.7</span>
+                    <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">V14.8</span>
                 </h1>
                 <p class="text-xs text-slate-400 mt-1 font-normal">سامانه مدیریت معاملات هوشمند و الگوریتمی تحت کلود</p>
             </div>
@@ -175,7 +184,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <!-- پاورقی امنیت -->
             <div class="mt-6 pt-5 border-t border-slate-800/80 text-center text-[11px] text-slate-500 flex items-center justify-center gap-1.5">
                 <i class="fa-solid fa-shield-halved text-emerald-400/80"></i>
-                <span>ایمن‌سازی شده با رمزنگاری SHA-256 و اتصال ایزوله اختصاصی</span>
+                <span>ایمن‌سازی شده با توکن نشست امنیتی و اتصال ایزوله اختصاصی</span>
             </div>
         </div>
     </div>
@@ -401,13 +410,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         let currentAuthMode = 'login';
 
-        if (currentUser && currentUser.user_id) {
+        if (currentUser && currentUser.user_id && currentUser.token) {
             document.getElementById('main-dashboard').classList.remove('hidden');
             document.getElementById('auth-container').classList.add('hidden');
             initDashboard();
         } else {
+            localStorage.removeItem('ares_user');
+            currentUser = null;
             document.getElementById('auth-container').classList.remove('hidden');
             document.getElementById('main-dashboard').classList.add('hidden');
+        }
+
+        function getAuthHeaders(extraHeaders = {}) {
+            const headers = {...extraHeaders};
+            if (currentUser && currentUser.token) {
+                headers['X-Auth-Token'] = currentUser.token;
+            }
+            return headers;
         }
 
         function switchAuthTab(mode) {
@@ -447,7 +466,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     body: JSON.stringify({identifier, password})
                 });
                 const data = await res.json();
-                if (res.ok) {
+                if (res.ok && data.token) {
                     localStorage.setItem('ares_user', JSON.stringify(data));
                     currentUser = data;
                     document.getElementById('auth-container').classList.add('hidden');
@@ -463,7 +482,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
         }
 
-        function logoutUser() {
+        async function logoutUser() {
+            try {
+                if (currentUser && currentUser.token) {
+                    await fetch('/api/auth/logout', {
+                        method: 'POST',
+                        headers: getAuthHeaders()
+                    });
+                }
+            } catch (e) {}
             localStorage.removeItem('ares_user');
             currentUser = null;
             location.reload();
@@ -492,7 +519,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!currentUser) return;
             try {
                 const res = await fetch('/api/user/status', {
-                    headers: {'X-User-Id': currentUser.user_id}
+                    headers: getAuthHeaders()
                 });
                 if (!res.ok) {
                     if (res.status === 401) logoutUser();
@@ -608,8 +635,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!currentUser) return;
             const res = await fetch('/api/user/toggle-trading', {
                 method: 'POST',
-                headers: {'X-User-Id': currentUser.user_id}
+                headers: getAuthHeaders()
             });
+            if (res.status === 401) return logoutUser();
             const data = await res.json();
             alert(data.message);
             fetchUserStatus();
@@ -620,8 +648,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (!confirm("آیا از قطع ارتباط کامل حساب خود و پاکسازی اطلاعات مطمئن هستید؟")) return;
             const res = await fetch('/api/user/disconnect', {
                 method: 'POST',
-                headers: {'X-User-Id': currentUser.user_id}
+                headers: getAuthHeaders()
             });
+            if (res.status === 401) return logoutUser();
             const data = await res.json();
             alert(data.message);
             fetchUserStatus();
@@ -630,9 +659,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         function openSettingsModal() {
             if (!currentUser) return;
             fetch('/api/user/config', {
-                headers: {'X-User-Id': currentUser.user_id}
+                headers: getAuthHeaders()
             })
-            .then(r => r.json())
+            .then(r => {
+                if (r.status === 401) { logoutUser(); throw new Error("401"); }
+                return r.json();
+            })
             .then(data => {
                 document.getElementById('cfg-mt5-login').value = data.mt5_login || '';
                 document.getElementById('cfg-mt5-server').value = data.mt5_server || 'AronMarkets-Demo';
@@ -640,7 +672,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 document.getElementById('cfg-binance-key').value = data.binance_api_key || '';
                 document.getElementById('cfg-binance-secret').value = '';
                 document.getElementById('settings-modal').classList.remove('hidden');
-            });
+            }).catch(() => {});
         }
 
         function closeSettingsModal() {
@@ -659,13 +691,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
             const res = await fetch('/api/user/config', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-User-Id': currentUser.user_id
-                },
+                headers: getAuthHeaders({'Content-Type': 'application/json'}),
                 body: JSON.stringify(payload)
             });
 
+            if (res.status === 401) return logoutUser();
             if (res.ok) {
                 alert("اطلاعات حساب با موفقیت ذخیره شد و به بروکر متصل گردید.");
                 closeSettingsModal();
@@ -688,7 +718,6 @@ async def bridge_sync_api(request: Request):
         identifier = str(data.get("identifier", "")).strip().lower()
         login_str = str(data.get("login", "")).strip()
 
-        # اگر ترمینال هنوز لاگین نشده (login == 0)، کش و معاملات باز نباید خراب شوند
         if login_str in ("", "0"):
             return {"status": "NOT_LOGGED_IN", "orders": []}
 
@@ -748,14 +777,20 @@ async def login_api(request: Request):
     return user
 
 
+@app.post("/api/auth/logout")
+def logout_api(x_auth_token: Optional[str] = Header(None)):
+    if x_auth_token:
+        db.delete_session_token(x_auth_token)
+    return {"status": "SUCCESS"}
+
+
 @app.get("/api/user/status")
-async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
-    if not x_user_id:
-        raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
+async def get_user_status_api(x_auth_token: Optional[str] = Header(None)):
+    user_id = _require_auth_user(x_auth_token)
 
     try:
-        user_cfg = db.get_user_broker_config(x_user_id)
-        user_cfg["user_id"] = x_user_id
+        user_cfg = db.get_user_broker_config(user_id)
+        user_cfg["user_id"] = user_id
 
         m_login = str(user_cfg.get("mt5_login", "")).strip()
         b_key = str(user_cfg.get("binance_api_key", "")).strip()
@@ -776,8 +811,8 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
         equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
         bridge_snap = account_config.get_user_bridge_snapshot(user_cfg)
 
-        summary = db.get_portfolio_summary(user_id=x_user_id)
-        open_trades_list = db.get_user_open_trades(user_id=x_user_id) if is_conn else []
+        summary = db.get_portfolio_summary(user_id=user_id)
+        open_trades_list = db.get_user_open_trades(user_id=user_id) if is_conn else []
 
         real_pnl = 0.0
         drawdown_pct = 0.0
@@ -826,10 +861,9 @@ async def get_user_status_api(x_user_id: Optional[str] = Header(None)):
 
 
 @app.get("/api/user/config")
-def get_user_config_api(x_user_id: Optional[str] = Header(None)):
-    if not x_user_id:
-        raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
-    cfg = db.get_user_broker_config(x_user_id)
+def get_user_config_api(x_auth_token: Optional[str] = Header(None)):
+    user_id = _require_auth_user(x_auth_token)
+    cfg = db.get_user_broker_config(user_id)
     return {
         "mt5_login": cfg.get("mt5_login", ""),
         "mt5_server": cfg.get("mt5_server", ""),
@@ -838,44 +872,41 @@ def get_user_config_api(x_user_id: Optional[str] = Header(None)):
 
 
 @app.post("/api/user/config")
-async def save_user_config_api(request: Request, x_user_id: Optional[str] = Header(None)):
-    if not x_user_id:
-        raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
+async def save_user_config_api(request: Request, x_auth_token: Optional[str] = Header(None)):
+    user_id = _require_auth_user(x_auth_token)
 
-    old_cfg = db.get_user_broker_config(x_user_id)
+    old_cfg = db.get_user_broker_config(user_id)
     old_login = str(old_cfg.get("mt5_login", "")).strip()
     old_ident = str(old_cfg.get("identifier", "")).strip().lower()
 
     new_cfg = await request.json()
-    db.save_user_broker_config(x_user_id, new_cfg)
+    db.save_user_broker_config(user_id, new_cfg)
 
     new_login = str(new_cfg.get("mt5_login", "")).strip()
     if old_login and old_login != new_login:
-        account_config.clear_user_bridge_cache([old_login, x_user_id, old_ident])
+        account_config.clear_user_bridge_cache([old_login, user_id, old_ident])
 
     return {"status": "SUCCESS", "message": "تنظیمات با موفقیت ذخیره شد."}
 
 
 @app.post("/api/user/toggle-trading")
-def toggle_trading_api(x_user_id: Optional[str] = Header(None)):
-    if not x_user_id:
-        raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
-    new_state = db.toggle_auto_trading(x_user_id)
+def toggle_trading_api(x_auth_token: Optional[str] = Header(None)):
+    user_id = _require_auth_user(x_auth_token)
+    new_state = db.toggle_auto_trading(user_id)
     status_txt = "فعال شد." if new_state else "متوقف شد."
     return {"status": "SUCCESS", "is_auto_trading": new_state, "message": f"معامله خودکار {status_txt}"}
 
 
 @app.post("/api/user/disconnect")
-def disconnect_broker_api(x_user_id: Optional[str] = Header(None)):
-    if not x_user_id:
-        raise HTTPException(status_code=401, detail="احراز هویت الزامی است.")
+def disconnect_broker_api(x_auth_token: Optional[str] = Header(None)):
+    user_id = _require_auth_user(x_auth_token)
 
-    user_cfg = db.get_user_broker_config(x_user_id)
+    user_cfg = db.get_user_broker_config(user_id)
     ident = str(user_cfg.get("identifier", "")).strip().lower()
     old_login = str(user_cfg.get("mt5_login", "")).strip()
 
-    db.disconnect_broker(x_user_id)
-    account_config.clear_user_bridge_cache([x_user_id, ident, old_login])
+    db.disconnect_broker(user_id)
+    account_config.clear_user_bridge_cache([user_id, ident, old_login])
 
     return {"status": "SUCCESS", "message": "ارتباط با بروکر قطع شد و اطلاعات حساب با موفقیت پاکسازی گردید."}
 
