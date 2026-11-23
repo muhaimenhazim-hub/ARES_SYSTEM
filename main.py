@@ -2,14 +2,14 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 MASTER REAL-TIME ENGINE + MULTI-USER INTEGRATION (main.py)
-VERSION: 14.7 (22H SESSION FILTER, REAL 3% DAILY / 12% DRAWDOWN RISK GUARD)
+VERSION: 14.8 (FVG-ONLY, 2.0R STAGED EXITS, ROLLING LEARNING & BIAS PROTECTION)
 ================================================================================
 """
 
 from datetime import datetime, timezone
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import account_config
 from ares_01_crt_strategy_engine import CRTStrategyEngine
@@ -46,7 +46,7 @@ class AresMasterSystem:
 
     def __init__(self):
         print("=" * 80)
-        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۷ - سشن ۲۲ ساعته، قفل ۳٪ ضرر روزانه و ۱۲٪ افت سرمایه)")
+        print("🏛 راه‌اندازی ربات هوشمند ARES (نسخه ۱۴.۸ - ستاپ FVG، خروج پله‌ای 2.0R، یادگیری غلتان و بایاس D1/H4)")
         print("=" * 80)
 
         self.db = AresDatabaseManager()
@@ -60,10 +60,13 @@ class AresMasterSystem:
         self.trade_engine = TradePositionManagementEngine(mode=ExecutionMode.LIVE)
         self.last_scan_time: float = 0.0
         self.last_binance_sync_time: float = 0.0
+        self.last_bias_protect_check_time: float = 0.0
 
         self.pending_trade_locks: Dict[str, float] = {}
         self.symbol_last_candle_time: Dict[str, str] = {}
         self._risk_alert_last_ts: Dict[str, float] = {}
+        self.recent_order_metadata: Dict[str, Dict[str, Any]] = {}
+        self._bias_protect_last_ts: Dict[int, float] = {}
 
         self._restore_open_positions_from_db()
 
@@ -76,6 +79,21 @@ class AresMasterSystem:
         if 21 <= utc_now.hour < 23:
             return False
         return True
+
+    @staticmethod
+    def get_current_session_name() -> str:
+        hour = datetime.now(timezone.utc).hour
+        if 0 <= hour < 7:
+            return "ASIAN"
+        if 7 <= hour < 12:
+            return "LONDON"
+        if 12 <= hour < 16:
+            return "LDN_NY_OVERLAP"
+        if 16 <= hour < 21:
+            return "NEW_YORK"
+        if 21 <= hour < 23:
+            return "ROLLOVER"
+        return "LATE_ASIA"
 
     def _log_risk_alert_throttled(self, key: str, message: str, cooldown: float = 300.0):
         now = time.time()
@@ -114,6 +132,151 @@ class AresMasterSystem:
         ]
         return [k.strip().lower() for k in keys if k and str(k).strip()]
 
+    @staticmethod
+    def _match_canonical_symbol(broker_sym: str) -> Optional[str]:
+        bs = str(broker_sym or "").strip()
+        if not bs:
+            return None
+        for canon_sym, aliases in account_config.BROKER_SYMBOL_ALIASES.items():
+            for alias in aliases:
+                if account_config._symbol_matches_alias(bs, alias, allow_prefix=True):
+                    return canon_sym
+        return None
+
+    def _enrich_mt5_trade_metadata(self):
+        """تکمیل خودکار متادیتای یادگیری (امتیاز ستاپ، بایاس روزانه و سشن) پس از ثبت تیکت متاتریدر در دیتابیس"""
+        now_ts = time.time()
+        for k in [key for key, val in self.recent_order_metadata.items() if (now_ts - float(val.get("ts", 0.0))) > 900.0]:
+            del self.recent_order_metadata[k]
+
+        if not self.recent_order_metadata:
+            return
+
+        try:
+            with self.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT trade_id, user_id, symbol, setup_name, setup_score, daily_bias, session_name
+                    FROM trades
+                    WHERE status = 'OPEN'
+                      AND mt5_ticket > 0
+                      AND (daily_bias = '' OR setup_score = 0 OR session_name = '');
+                """)
+                rows = cursor.fetchall()
+                for row in rows:
+                    canon_sym = self._match_canonical_symbol(row["symbol"])
+                    if not canon_sym:
+                        continue
+                    clean_sym = canon_sym.replace(" ", "").rstrip(".")
+                    meta = self.recent_order_metadata.get(f"{row['user_id']}_{clean_sym}")
+                    if not meta:
+                        continue
+                    final_setup = str(row["setup_name"] or "").strip() or meta.get("setup_name", "")
+                    cursor.execute("""
+                        UPDATE trades
+                        SET setup_name = ?, setup_score = ?, daily_bias = ?, session_name = ?
+                        WHERE trade_id = ?;
+                    """, (
+                        final_setup,
+                        float(meta.get("setup_score", 0.0) or 0.0),
+                        str(meta.get("daily_bias", "")),
+                        str(meta.get("session_name", "")),
+                        row["trade_id"],
+                    ))
+        except Exception:
+            pass
+
+    def _protect_open_trades_on_bias_reversal(self):
+        """محافظت از پوزیشن‌های باز در سود هنگام چرخش شدید بایاس روزانه/چهارساعته (انتقال SL به Break-Even)"""
+        now_ts = time.time()
+        if (now_ts - self.last_bias_protect_check_time) < 60.0:
+            return
+        self.last_bias_protect_check_time = now_ts
+
+        if not self.is_forex_session_open():
+            return
+
+        try:
+            active_users = self.db.get_auto_trading_users()
+            if not active_users:
+                return
+
+            bias_cache: Dict[str, str] = {}
+            for user in active_users:
+                user_id = user["user_id"]
+                if not str(user.get("mt5_login", "")).strip():
+                    continue
+                open_trades = self.db.get_user_open_trades(user_id=user_id)
+                if not open_trades:
+                    continue
+
+                target_keys = self._get_user_routing_keys(user_id)
+                for t in open_trades:
+                    ticket = int(t.get("mt5_ticket", 0) or 0)
+                    if ticket <= 0:
+                        continue
+                    if (now_ts - self._bias_protect_last_ts.get(ticket, 0.0)) < 300.0:
+                        continue
+
+                    pnl = float(t.get("realized_pnl", 0.0) or 0.0)
+                    if pnl <= 0.0:
+                        continue
+
+                    entry = float(t.get("entry_price", 0.0) or 0.0)
+                    sl = float(t.get("stop_loss", 0.0) or 0.0)
+                    tp = float(t.get("tp1", 0.0) or 0.0)
+                    side = str(t.get("side", "BUY")).upper()
+                    if entry <= 0.0:
+                        continue
+
+                    already_be = (side == "BUY" and sl >= entry) or (side == "SELL" and 0.0 < sl <= entry)
+                    if already_be:
+                        continue
+
+                    canon_sym = self._match_canonical_symbol(str(t.get("symbol", "")))
+                    if not canon_sym:
+                        continue
+
+                    if canon_sym not in bias_cache:
+                        bundle = self.data_service.get_live_multitimeframe_bundle(canon_sym)
+                        if not bundle:
+                            bias_cache[canon_sym] = "NONE"
+                        else:
+                            _, bias_details = self.smc_engine.evaluate_daily_bias(
+                                df_h4=bundle.get("df_h4"),
+                                df_d1=bundle.get("df_d1"),
+                            )
+                            bias_cache[canon_sym] = str(bias_details.get("strong_reversal_to", "NONE"))
+
+                    strong_rev = bias_cache[canon_sym]
+                    is_opposite_reversal = (
+                        (side == "BUY" and strong_rev == "BEARISH")
+                        or (side == "SELL" and strong_rev == "BULLISH")
+                    )
+                    if not is_opposite_reversal:
+                        continue
+
+                    queued = account_config.queue_mt5_command(
+                        target_keys,
+                        {
+                            "action": "MODIFY",
+                            "ticket": ticket,
+                            "symbol": str(t.get("symbol", canon_sym)),
+                            "sl": round(entry, 5),
+                            "tp": round(tp, 5) if tp > 0 else 0.0,
+                        },
+                        user_cfg=user,
+                    )
+                    if queued:
+                        self._bias_protect_last_ts[ticket] = now_ts
+                        print(
+                            f"🛡️ [محافظت چرخش بایاس | تیکت #{ticket} {t.get('symbol')}]: "
+                            f"چرخش شدید بایاس به {strong_rev} -> انتقال SL به نقطه ورود ({entry:.5f}).",
+                            flush=True,
+                        )
+        except Exception:
+            pass
+
     def _sync_binance_users_positions(self):
         """همگام‌سازی لحظه‌ای پوزیشن‌های باز صرافی بایننس با دیتابیس و پاکسازی حافظه پوزیشن‌های بسته‌شده"""
         now = time.time()
@@ -141,8 +304,10 @@ class AresMasterSystem:
             pass
 
     def manage_active_positions_fast(self):
-        """مدیریت همگام‌سازی پوزیشن‌های باز با صرافی/بروکر (ریسک‌فری و SL/TP متاتریدر داخل اکسپرت اجرا می‌شود)"""
+        """مدیریت همگام‌سازی پوزیشن‌های باز با صرافی/بروکر، متادیتای یادگیری و محافظت بایاس"""
         self._sync_binance_users_positions()
+        self._enrich_mt5_trade_metadata()
+        self._protect_open_trades_on_bias_reversal()
 
     @staticmethod
     def _round_volume_to_step(raw_vol: float, specs: ContractSpecs) -> float:
@@ -197,6 +362,7 @@ class AresMasterSystem:
 
         now_ts = time.time()
         forex_session_open = self.is_forex_session_open()
+        session_name = self.get_current_session_name()
 
         expired_keys = [k for k, t in self.pending_trade_locks.items() if now_ts - t > 900.0]
         for k in expired_keys:
@@ -331,14 +497,29 @@ class AresMasterSystem:
 
             current_price = bundle["current_price"]
             market_type = bundle["market_type"]
+            df_mtf = bundle["df_mtf"]
+            df_mtf_closed = df_mtf.iloc[:-1] if len(df_mtf) > 2 else df_mtf
+            atr_series = self.crt_engine.calculate_atr(df_mtf_closed)
+            current_atr = float(atr_series.iloc[-1]) if len(atr_series) > 0 else 0.0
 
             crt_res = self.crt_engine.evaluate_crt_setup(
                 symbol, market_type, bundle["df_htf"], bundle["df_mtf"], bundle["df_ltf"]
             )
-            smc_res = self.smc_engine.analyze_market(symbol, market_type, bundle["df_mtf"])
+            smc_res = self.smc_engine.analyze_market(
+                symbol,
+                market_type,
+                bundle["df_mtf"],
+                df_h4=bundle.get("df_h4"),
+                df_d1=bundle.get("df_d1"),
+            )
 
             opportunity = self.setup_engine.evaluate_opportunity(
-                crt_res.to_dict(), smc_res.to_dict(), current_price, session_valid=True, in_news_window=False
+                crt_res.to_dict(),
+                smc_res.to_dict(),
+                current_price,
+                session_valid=True,
+                in_news_window=False,
+                atr=current_atr,
             )
 
             self.db.record_setup_evaluation(opportunity.to_dict())
@@ -346,8 +527,22 @@ class AresMasterSystem:
             if opportunity.status != "APPROVED":
                 continue
 
+            # سیستم یادگیری از گذشته: ارزیابی غلتان ستاپ با حداقل نمونه آماری N >= 15
+            rolling_perf = self.db.get_setup_rolling_performance(opportunity.setup_name, window_size=30, min_samples=15)
+            if rolling_perf.get("is_disabled"):
+                self._log_risk_alert_throttled(
+                    f"disabled_setup_{opportunity.setup_name}",
+                    f"🧠 [یادگیری ARES]: {rolling_perf.get('reason')} — ورود متوقف شد.",
+                )
+                continue
+
+            post_news = news_status.get("post_news_analysis", {})
+            if post_news.get("has_data") and post_news.get("news_bias") != "NEUTRAL":
+                print(f"📰 [{symbol}] {post_news.get('summary')}", flush=True)
+
             sl_dist = round(abs(opportunity.entry_price - opportunity.stop_loss), 6)
-            tp_dist = round(sl_dist * 1.5, 6)
+            tp_dist = round(sl_dist * 2.0, 6)
+            order_comment = f"ARES|{opportunity.setup_name}"[:31]
 
             for u_ctx in fresh_candidates:
                 user = u_ctx["user"]
@@ -382,18 +577,18 @@ class AresMasterSystem:
                         side=opportunity.direction,
                         volume=vol,
                         stop_loss=opportunity.stop_loss,
-                        take_profit=opportunity.take_profit_1,
+                        take_profit=opportunity.take_profit_3,
                         sl_dist=sl_dist,
                         tp_dist=tp_dist,
                     )
                     if res.get("success"):
                         real_entry = float(res.get("entry_price") or opportunity.entry_price)
                         real_sl = float(res.get("stop_loss") or opportunity.stop_loss)
-                        real_tp1 = float(res.get("take_profit") or opportunity.take_profit_1)
+                        real_tp3 = float(res.get("take_profit") or opportunity.take_profit_3)
                         exec_vol = float(res.get("volume") or vol)
                         is_buy = opportunity.direction == "BUY"
-                        tp2 = (real_entry + (sl_dist * 2.5)) if is_buy else (real_entry - (sl_dist * 2.5))
-                        tp3 = (real_entry + (sl_dist * 4.0)) if is_buy else (real_entry - (sl_dist * 4.0))
+                        tp1 = (real_entry + (sl_dist * 1.1)) if is_buy else (real_entry - (sl_dist * 1.1))
+                        tp2 = (real_entry + (sl_dist * 1.5)) if is_buy else (real_entry - (sl_dist * 1.5))
 
                         ok_pos, pos_obj, _ = self.trade_engine.open_position(
                             symbol=symbol,
@@ -401,13 +596,17 @@ class AresMasterSystem:
                             side_str=opportunity.direction,
                             entry_price=real_entry,
                             stop_loss=real_sl,
-                            tp1=real_tp1,
+                            tp1=tp1,
                             tp2=tp2,
-                            tp3=tp3,
+                            tp3=real_tp3,
                             allocated_volume=exec_vol,
                             risk_usd=risk_usd,
                             user_id=user_id,
                             mt5_ticket=0,
+                            setup_name=opportunity.setup_name,
+                            setup_score=round(float(opportunity.total_score), 1),
+                            daily_bias=opportunity.daily_bias,
+                            session_name=session_name,
                         )
                         if ok_pos and pos_obj:
                             old_id = pos_obj.position_id
@@ -419,7 +618,7 @@ class AresMasterSystem:
                         self.pending_trade_locks[lock_key] = time.time()
                         self.symbol_last_candle_time[candle_key] = candle_ts_str
                         print(
-                            f"\n🚀 [سفارش بایننس اجرا شد | کاربر {user.get('identifier')}]: {symbol} | ریسک: ${risk_usd}",
+                            f"\n🚀 [سفارش بایننس اجرا شد | کاربر {user.get('identifier')}]: {symbol} | ستاپ: {opportunity.setup_name} | ریسک: ${risk_usd}",
                             flush=True,
                         )
                 else:
@@ -430,18 +629,33 @@ class AresMasterSystem:
                         "symbol": broker_symbol,
                         "volume": vol,
                         "sl": round(opportunity.stop_loss, 5),
-                        "tp": round(opportunity.take_profit_1, 5),
+                        "tp": round(opportunity.take_profit_3, 5),
                         "sl_dist": sl_dist,
                         "tp_dist": tp_dist,
                         "risk_usd": risk_usd,
+                        "comment": order_comment,
+                        "setup_name": opportunity.setup_name,
+                        "setup_score": round(float(opportunity.total_score), 1),
+                        "daily_bias": opportunity.daily_bias,
+                        "session_name": session_name,
                     }, user_cfg=user)
 
                     if queued:
                         self.pending_trade_locks[lock_key] = time.time()
                         self.symbol_last_candle_time[candle_key] = candle_ts_str
+                        self.recent_order_metadata[f"{user_id}_{clean_sym}"] = {
+                            "canonical_symbol": symbol,
+                            "setup_name": opportunity.setup_name,
+                            "setup_score": round(float(opportunity.total_score), 1),
+                            "daily_bias": opportunity.daily_bias,
+                            "session_name": session_name,
+                            "ts": time.time(),
+                        }
 
                         print(
-                            f"\n📡 [ارسال همزمان به متاتریدر {user.get('mt5_login')}]: {broker_symbol} | {opportunity.direction} | ریسک دلاری: ${risk_usd} | نسبت 1:1.5",
+                            f"\n📡 [ارسال همزمان به متاتریدر {user.get('mt5_login')}]: {broker_symbol} | {opportunity.direction} | "
+                            f"ستاپ: {opportunity.setup_name} ({opportunity.total_score:.1f}) | بایاس: {opportunity.daily_bias} | "
+                            f"ریسک: ${risk_usd} | تارگت نهایی 2.0R",
                             flush=True,
                         )
 

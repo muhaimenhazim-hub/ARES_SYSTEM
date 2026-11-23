@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V15.0 |
-//|  ORDERCALCPROFIT SIZING, 1:1 RISK-FREE & LIVE CANDLE EXPORT BRIDGE |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V15.1 |
+//|  1.0R BE, 1.1/1.5/2.0R STAGED EXITS, H4/D1 CANDLES & CALENDAR EA |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "15.00"
+#property version   "15.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -25,9 +25,11 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V15.0 Initialized (Max Positions: ", InpMaxOpenPositions, ", Max Lot: ", InpMaxLotCap, ", OrderCalcProfit + Risk-Free + Live Candles ON).");
-   ManageRiskFreePositions();
+   Print("🚀 ARES Bridge V15.1 Initialized (1.0R BE, 1.1/1.5/2.0R Staged Exits, H4/D1 Candles & Calendar ON).");
+   ManagePositionsAndStagedExits();
    SyncAccountWithServer();
+   ExportLiveCandlesFile();
+   ExportLiveCalendarFile();
    return(INIT_SUCCEEDED);
 }
 
@@ -44,18 +46,60 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   ManageRiskFreePositions();
+   ManagePositionsAndStagedExits();
    SyncAccountWithServer();
    ExportLiveCandlesFile();
+   ExportLiveCalendarFile();
 }
 
 //+------------------------------------------------------------------+
-//| ریسک‌فری خودکار به محض رسیدن معامله به سود 1:1                   |
+//| محاسبه امن حجم خروج پله‌ای با رعایت حداقل حجم بروکر (0.01)      |
 //+------------------------------------------------------------------+
-void ManageRiskFreePositions()
+double CalcSafePartialCloseVolume(string sym, double initVol, double curVol, double targetCumRatio)
+{
+   double minVol = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   double step   = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   if(minVol <= 0.0) minVol = 0.01;
+   if(step <= 0.0)   step   = 0.01;
+
+   int volDigits = 2;
+   if(step >= 1.0) volDigits = 0;
+   else if(step >= 0.1) volDigits = 1;
+   else if(step >= 0.01) volDigits = 2;
+   else volDigits = 3;
+
+   if(curVol <= (minVol + 1e-9))
+      return 0.0;
+
+   double desiredRemaining = initVol * MathMax(0.0, 1.0 - targetCumRatio);
+   double rawClose = curVol - desiredRemaining;
+   if(rawClose <= 0.0)
+      return 0.0;
+
+   double closeVol = MathFloor((rawClose / step) + 1e-9) * step;
+   closeVol = NormalizeDouble(closeVol, volDigits);
+   if(closeVol < minVol)
+      return 0.0;
+
+   double remAfter = NormalizeDouble(curVol - closeVol, volDigits);
+   if(remAfter < (minVol - 1e-9))
+   {
+      double maxSafe = MathFloor(((curVol - minVol) / step) + 1e-9) * step;
+      maxSafe = NormalizeDouble(maxSafe, volDigits);
+      if(maxSafe < minVol)
+         return 0.0;
+      closeVol = maxSafe;
+   }
+   return closeVol;
+}
+
+//+------------------------------------------------------------------+
+//| مدیریت ریسک‌فری در 1.0R و خروج پله‌ای 1.1R (30%) و 1.5R (30%)   |
+//+------------------------------------------------------------------+
+void ManagePositionsAndStagedExits()
 {
    int total = PositionsTotal();
-   for(int i = 0; i < total; i++)
+   for(int i = total - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
@@ -65,7 +109,8 @@ void ManageRiskFreePositions()
       double priceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl        = PositionGetDouble(POSITION_SL);
       double tp        = PositionGetDouble(POSITION_TP);
-      if(sl <= 0.0 || priceOpen <= 0.0) continue;
+      double curVol    = PositionGetDouble(POSITION_VOLUME);
+      if(priceOpen <= 0.0 || curVol <= 0.0) continue;
 
       int    digits     = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
       double point      = SymbolInfoDouble(sym, SYMBOL_POINT);
@@ -74,12 +119,41 @@ void ManageRiskFreePositions()
       double stopsLevel = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * point;
       if(ask <= 0.0 || bid <= 0.0 || point <= 0.0) continue;
 
+      string gvInitVol  = "ARES_IV_" + IntegerToString((long)ticket);
+      string gvRiskDist = "ARES_RD_" + IntegerToString((long)ticket);
+      string gvStage    = "ARES_ST_" + IntegerToString((long)ticket);
+
+      double initVol = GlobalVariableCheck(gvInitVol) ? GlobalVariableGet(gvInitVol) : curVol;
+      if(initVol < curVol) initVol = curVol;
+      if(!GlobalVariableCheck(gvInitVol)) GlobalVariableSet(gvInitVol, initVol);
+
+      double riskDist = GlobalVariableCheck(gvRiskDist) ? GlobalVariableGet(gvRiskDist) : 0.0;
+      if(riskDist <= (5.0 * point))
+      {
+         if(tp > 0.0 && MathAbs(tp - priceOpen) > (10.0 * point))
+            riskDist = MathAbs(tp - priceOpen) / 2.0;
+         else if(sl > 0.0)
+            riskDist = MathAbs(priceOpen - sl);
+
+         if(riskDist > (5.0 * point))
+            GlobalVariableSet(gvRiskDist, riskDist);
+      }
+      if(riskDist <= (5.0 * point)) continue;
+
+      int stage = GlobalVariableCheck(gvStage) ? (int)GlobalVariableGet(gvStage) : 0;
+      if(stage == 0)
+      {
+         if((posType == POSITION_TYPE_BUY && sl >= priceOpen) ||
+            (posType == POSITION_TYPE_SELL && sl > 0.0 && sl <= priceOpen))
+            stage = 1;
+      }
+
       if(posType == POSITION_TYPE_BUY)
       {
-         if(sl < priceOpen)
+         // مرحله ۱: رسیدن به ریوارد 1.0R -> انتقال SL به سر به سر (Break-Even)
+         if(stage < 1 && bid >= (priceOpen + riskDist))
          {
-            double riskDist = priceOpen - sl;
-            if(riskDist > (5.0 * point) && bid >= (priceOpen + riskDist))
+            if(sl < priceOpen)
             {
                double beSL = NormalizeDouble(priceOpen + (riskDist * 0.05), digits);
                if(beSL <= priceOpen) beSL = NormalizeDouble(priceOpen + point, digits);
@@ -90,29 +164,163 @@ void ManageRiskFreePositions()
                {
                   SetSymbolFillingMode(sym);
                   if(ExtTrade.PositionModify(ticket, beSL, tp))
-                     Print("🛡️ [ARES RISK-FREE]: BUY #", ticket, " (", sym, ") reached 1:1 RR -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
+                  {
+                     stage = 1;
+                     GlobalVariableSet(gvStage, 1.0);
+                     Print("🛡️ [ARES 1.0R RISK-FREE]: BUY #", ticket, " (", sym, ") -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
+                  }
                }
+            }
+            else
+            {
+               stage = 1;
+               GlobalVariableSet(gvStage, 1.0);
+            }
+         }
+
+         // مرحله ۲: رسیدن به ریوارد 1.1R (TP1) -> بستن 30% حجم اولیه
+         if(stage < 2 && bid >= (priceOpen + (riskDist * 1.1)))
+         {
+            double closeVol1 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.30);
+            if(closeVol1 > 0.0)
+            {
+               SetSymbolFillingMode(sym);
+               if(ExtTrade.PositionClosePartial(ticket, closeVol1))
+               {
+                  stage = 2;
+                  GlobalVariableSet(gvStage, 2.0);
+                  curVol = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_VOLUME) : (curVol - closeVol1);
+                  Print("💰 [ARES TP1 1.1R]: BUY #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol1, 2));
+               }
+            }
+            else
+            {
+               stage = 2;
+               GlobalVariableSet(gvStage, 2.0);
+               Print("ℹ️ [ARES TP1 1.1R]: BUY #", ticket, " (", sym, ") min-lot 0.01 protected at BE.");
+            }
+         }
+
+         // مرحله ۳: رسیدن به ریوارد 1.5R (TP2) -> بستن 30% حجم اولیه + تریلینگ SL به 1.1R
+         if(stage < 3 && bid >= (priceOpen + (riskDist * 1.5)))
+         {
+            double closeVol2 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.60);
+            bool partialOk = true;
+            if(closeVol2 > 0.0)
+            {
+               SetSymbolFillingMode(sym);
+               partialOk = ExtTrade.PositionClosePartial(ticket, closeVol2);
+               if(partialOk)
+                  Print("💰 [ARES TP2 1.5R]: BUY #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol2, 2));
+            }
+
+            if(partialOk && PositionSelectByTicket(ticket))
+            {
+               double curSL = PositionGetDouble(POSITION_SL);
+               double curTP = PositionGetDouble(POSITION_TP);
+               double trailSL = NormalizeDouble(priceOpen + (riskDist * 1.1), digits);
+               double maxAllowedSL = NormalizeDouble(bid - stopsLevel - (2.0 * point), digits);
+               if(trailSL > maxAllowedSL) trailSL = maxAllowedSL;
+               if(trailSL > curSL)
+               {
+                  SetSymbolFillingMode(sym);
+                  ExtTrade.PositionModify(ticket, trailSL, curTP);
+               }
+               stage = 3;
+               GlobalVariableSet(gvStage, 3.0);
+            }
+            else if(closeVol2 <= 0.0)
+            {
+               stage = 3;
+               GlobalVariableSet(gvStage, 3.0);
             }
          }
       }
       else if(posType == POSITION_TYPE_SELL)
       {
-         if(sl > priceOpen)
+         // مرحله ۱: رسیدن به ریوارد 1.0R -> انتقال SL به سر به سر (Break-Even)
+         if(stage < 1 && ask <= (priceOpen - riskDist))
          {
-            double riskDist = sl - priceOpen;
-            if(riskDist > (5.0 * point) && ask <= (priceOpen - riskDist))
+            if(sl == 0.0 || sl > priceOpen)
             {
                double beSL = NormalizeDouble(priceOpen - (riskDist * 0.05), digits);
                if(beSL >= priceOpen) beSL = NormalizeDouble(priceOpen - point, digits);
                double minAllowedSL = NormalizeDouble(ask + stopsLevel + (2.0 * point), digits);
                if(beSL < minAllowedSL) beSL = minAllowedSL;
 
-               if(beSL < sl && beSL <= priceOpen)
+               if((sl == 0.0 || beSL < sl) && beSL <= priceOpen)
                {
                   SetSymbolFillingMode(sym);
                   if(ExtTrade.PositionModify(ticket, beSL, tp))
-                     Print("🛡️ [ARES RISK-FREE]: SELL #", ticket, " (", sym, ") reached 1:1 RR -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
+                  {
+                     stage = 1;
+                     GlobalVariableSet(gvStage, 1.0);
+                     Print("🛡️ [ARES 1.0R RISK-FREE]: SELL #", ticket, " (", sym, ") -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
+                  }
                }
+            }
+            else
+            {
+               stage = 1;
+               GlobalVariableSet(gvStage, 1.0);
+            }
+         }
+
+         // مرحله ۲: رسیدن به ریوارد 1.1R (TP1) -> بستن 30% حجم اولیه
+         if(stage < 2 && ask <= (priceOpen - (riskDist * 1.1)))
+         {
+            double closeVol1 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.30);
+            if(closeVol1 > 0.0)
+            {
+               SetSymbolFillingMode(sym);
+               if(ExtTrade.PositionClosePartial(ticket, closeVol1))
+               {
+                  stage = 2;
+                  GlobalVariableSet(gvStage, 2.0);
+                  curVol = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_VOLUME) : (curVol - closeVol1);
+                  Print("💰 [ARES TP1 1.1R]: SELL #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol1, 2));
+               }
+            }
+            else
+            {
+               stage = 2;
+               GlobalVariableSet(gvStage, 2.0);
+               Print("ℹ️ [ARES TP1 1.1R]: SELL #", ticket, " (", sym, ") min-lot 0.01 protected at BE.");
+            }
+         }
+
+         // مرحله ۳: رسیدن به ریوارد 1.5R (TP2) -> بستن 30% حجم اولیه + تریلینگ SL به 1.1R
+         if(stage < 3 && ask <= (priceOpen - (riskDist * 1.5)))
+         {
+            double closeVol2 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.60);
+            bool partialOk = true;
+            if(closeVol2 > 0.0)
+            {
+               SetSymbolFillingMode(sym);
+               partialOk = ExtTrade.PositionClosePartial(ticket, closeVol2);
+               if(partialOk)
+                  Print("💰 [ARES TP2 1.5R]: SELL #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol2, 2));
+            }
+
+            if(partialOk && PositionSelectByTicket(ticket))
+            {
+               double curSL = PositionGetDouble(POSITION_SL);
+               double curTP = PositionGetDouble(POSITION_TP);
+               double trailSL = NormalizeDouble(priceOpen - (riskDist * 1.1), digits);
+               double minAllowedSL = NormalizeDouble(ask + stopsLevel + (2.0 * point), digits);
+               if(trailSL < minAllowedSL) trailSL = minAllowedSL;
+               if(curSL == 0.0 || trailSL < curSL)
+               {
+                  SetSymbolFillingMode(sym);
+                  ExtTrade.PositionModify(ticket, trailSL, curTP);
+               }
+               stage = 3;
+               GlobalVariableSet(gvStage, 3.0);
+            }
+            else if(closeVol2 <= 0.0)
+            {
+               stage = 3;
+               GlobalVariableSet(gvStage, 3.0);
             }
          }
       }
@@ -342,6 +550,18 @@ void SetSymbolFillingMode(string sym)
 }
 
 //+------------------------------------------------------------------+
+//| پاکسازی رشته برای قرارگیری امن در JSON                           |
+//+------------------------------------------------------------------+
+string SanitizeJsonStr(string s)
+{
+   StringReplace(s, "\\", "");
+   StringReplace(s, "\"", "");
+   StringReplace(s, "\r", " ");
+   StringReplace(s, "\n", " ");
+   return s;
+}
+
+//+------------------------------------------------------------------+
 //| محاسبه سود خالص واقعی از تاریخچه کل معاملات بسته شده در بروکر    |
 //+------------------------------------------------------------------+
 double CalculateRealHistoryPnL(double &initialDepositOut)
@@ -390,7 +610,8 @@ string BuildOpenPositionsJson(double &floatingPnLOut)
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0) continue;
 
-      string sym       = PositionGetString(POSITION_SYMBOL);
+      string sym       = SanitizeJsonStr(PositionGetString(POSITION_SYMBOL));
+      string comment   = SanitizeJsonStr(PositionGetString(POSITION_COMMENT));
       long   posType   = PositionGetInteger(POSITION_TYPE);
       string sideStr   = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
       double priceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -406,7 +627,7 @@ string BuildOpenPositionsJson(double &floatingPnLOut)
       first = false;
 
       json += StringFormat(
-         "{\"ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"entry_price\":%s,\"sl\":%s,\"tp\":%s,\"volume\":%.2f,\"profit\":%.2f}",
+         "{\"ticket\":%I64u,\"symbol\":\"%s\",\"side\":\"%s\",\"entry_price\":%s,\"sl\":%s,\"tp\":%s,\"volume\":%.2f,\"profit\":%.2f,\"comment\":\"%s\"}",
          ticket,
          sym,
          sideStr,
@@ -414,7 +635,8 @@ string BuildOpenPositionsJson(double &floatingPnLOut)
          DoubleToString(sl, digits),
          DoubleToString(tp, digits),
          vol,
-         profit
+         profit,
+         comment
       );
    }
    json += "]";
@@ -478,15 +700,18 @@ void ProcessServerOrders(string response)
 //+------------------------------------------------------------------+
 void ExecuteSingleOrderJson(string orderObj)
 {
-   string action    = ExtractJsonVal(orderObj, "action");
-   string rawSymbol = ExtractJsonVal(orderObj, "symbol");
-   double volume    = StringToDouble(ExtractJsonVal(orderObj, "volume"));
-   double sl        = StringToDouble(ExtractJsonVal(orderObj, "sl"));
-   double tp        = StringToDouble(ExtractJsonVal(orderObj, "tp"));
-   double slDist    = StringToDouble(ExtractJsonVal(orderObj, "sl_dist"));
-   double tpDist    = StringToDouble(ExtractJsonVal(orderObj, "tp_dist"));
-   double riskUsd   = StringToDouble(ExtractJsonVal(orderObj, "risk_usd"));
-   ulong  ticket    = (ulong)StringToInteger(ExtractJsonVal(orderObj, "ticket"));
+   string action       = ExtractJsonVal(orderObj, "action");
+   string rawSymbol    = ExtractJsonVal(orderObj, "symbol");
+   double volume       = StringToDouble(ExtractJsonVal(orderObj, "volume"));
+   double sl           = StringToDouble(ExtractJsonVal(orderObj, "sl"));
+   double tp           = StringToDouble(ExtractJsonVal(orderObj, "tp"));
+   double slDist       = StringToDouble(ExtractJsonVal(orderObj, "sl_dist"));
+   double tpDist       = StringToDouble(ExtractJsonVal(orderObj, "tp_dist"));
+   double riskUsd      = StringToDouble(ExtractJsonVal(orderObj, "risk_usd"));
+   ulong  ticket       = (ulong)StringToInteger(ExtractJsonVal(orderObj, "ticket"));
+   string orderComment = SanitizeJsonStr(ExtractJsonVal(orderObj, "comment"));
+   if(orderComment == "") orderComment = "ARES_AI";
+   if(StringLen(orderComment) > 31) orderComment = StringSubstr(orderComment, 0, 31);
 
    string sym = ResolveBrokerSymbol(rawSymbol);
    SetSymbolFillingMode(sym);
@@ -637,10 +862,10 @@ void ExecuteSingleOrderJson(string orderObj)
       double normSL = NormalizeDouble(sl, digits);
       double normTP = NormalizeDouble(tp, digits);
 
-      // --- محاسبه دقیق SL و TP نسبت به قیمت لحظه‌ای واقعی بروکر (تضمین نسبت 1:1.5) ---
+      // --- محاسبه دقیق SL و TP نهایی (2.0R) نسبت به قیمت لحظه‌ای واقعی بروکر ---
       if(slDist > 0.0)
       {
-         double effectiveTpDist = (tpDist > 0.0) ? MathMax(tpDist, slDist * 1.5) : (slDist * 1.5);
+         double effectiveTpDist = (tpDist > 0.0) ? MathMax(tpDist, slDist * 2.0) : (slDist * 2.0);
 
          if(action == "BUY")
          {
@@ -659,10 +884,10 @@ void ExecuteSingleOrderJson(string orderObj)
       {
          if(normSL >= ask) normSL = 0;
          if(normTP > 0 && normTP <= ask) normTP = 0;
-         ok = ExtTrade.Buy(volume, sym, ask, normSL, normTP, "ARES_AI");
+         ok = ExtTrade.Buy(volume, sym, ask, normSL, normTP, orderComment);
          if(!ok && (normSL > 0 || normTP > 0))
          {
-            ok = ExtTrade.Buy(volume, sym, ask, 0, 0, "ARES_AI");
+            ok = ExtTrade.Buy(volume, sym, ask, 0, 0, orderComment);
             if(ok)
             {
                Sleep(200);
@@ -674,7 +899,7 @@ void ExecuteSingleOrderJson(string orderObj)
                      double openP = PositionGetDouble(POSITION_PRICE_OPEN);
                      if(slDist > 0.0)
                      {
-                        double effTp = (tpDist > 0.0) ? MathMax(tpDist, slDist * 1.5) : (slDist * 1.5);
+                        double effTp = (tpDist > 0.0) ? MathMax(tpDist, slDist * 2.0) : (slDist * 2.0);
                         normSL = NormalizeDouble(openP - slDist, digits);
                         normTP = NormalizeDouble(openP + effTp, digits);
                      }
@@ -689,10 +914,10 @@ void ExecuteSingleOrderJson(string orderObj)
       {
          if(normSL > 0 && normSL <= bid) normSL = 0;
          if(normTP >= bid) normTP = 0;
-         ok = ExtTrade.Sell(volume, sym, bid, normSL, normTP, "ARES_AI");
+         ok = ExtTrade.Sell(volume, sym, bid, normSL, normTP, orderComment);
          if(!ok && (normSL > 0 || normTP > 0))
          {
-            ok = ExtTrade.Sell(volume, sym, bid, 0, 0, "ARES_AI");
+            ok = ExtTrade.Sell(volume, sym, bid, 0, 0, orderComment);
             if(ok)
             {
                Sleep(200);
@@ -704,7 +929,7 @@ void ExecuteSingleOrderJson(string orderObj)
                      double openP = PositionGetDouble(POSITION_PRICE_OPEN);
                      if(slDist > 0.0)
                      {
-                        double effTp = (tpDist > 0.0) ? MathMax(tpDist, slDist * 1.5) : (slDist * 1.5);
+                        double effTp = (tpDist > 0.0) ? MathMax(tpDist, slDist * 2.0) : (slDist * 2.0);
                         normSL = NormalizeDouble(openP + slDist, digits);
                         normTP = NormalizeDouble(openP - effTp, digits);
                      }
@@ -715,7 +940,23 @@ void ExecuteSingleOrderJson(string orderObj)
             }
          }
       }
-      Print("🔥 Order Executed [", action, " ", sym, " (raw:", rawSymbol, ") Vol:", volume, " SL:", DoubleToString(normSL, digits), " TP:", DoubleToString(normTP, digits), "] Result: ", ok, " Retcode: ", ExtTrade.ResultRetcodeDescription());
+
+      if(ok && slDist > 0.0)
+      {
+         for(int p = PositionsTotal() - 1; p >= 0; p--)
+         {
+            ulong pt = PositionGetTicket(p);
+            if(pt > 0 && PositionGetString(POSITION_SYMBOL) == sym)
+            {
+               GlobalVariableSet("ARES_IV_" + IntegerToString((long)pt), PositionGetDouble(POSITION_VOLUME));
+               GlobalVariableSet("ARES_RD_" + IntegerToString((long)pt), slDist);
+               GlobalVariableSet("ARES_ST_" + IntegerToString((long)pt), 0.0);
+               break;
+            }
+         }
+      }
+
+      Print("🔥 Order Executed [", action, " ", sym, " (raw:", rawSymbol, ") Vol:", volume, " SL:", DoubleToString(normSL, digits), " TP:", DoubleToString(normTP, digits), " Comment:", orderComment, "] Result: ", ok, " Retcode: ", ExtTrade.ResultRetcodeDescription());
    }
    else if(action == "CLOSE")
    {
@@ -781,7 +1022,7 @@ string BuildRatesArrayJson(string sym, ENUM_TIMEFRAMES tf, int count)
 }
 
 //+------------------------------------------------------------------+
-//| خروجی کندل‌های لحظه‌ای هر ۱۵ ثانیه با کش ۱۸۰ ثانیه‌ای نمادها     |
+//| خروجی کندل‌های لحظه‌ای هر ۱۵ ثانیه (5m/15m/1h/4h/1d)             |
 //+------------------------------------------------------------------+
 void ExportLiveCandlesFile()
 {
@@ -833,22 +1074,22 @@ void ExportLiveCandlesFile()
       string m5Json  = BuildRatesArrayJson(bsym, PERIOD_M5, 60);
       if(h1Json == "[]" || m15Json == "[]" || m5Json == "[]") continue;
 
-      string safeBsym = bsym;
-      StringReplace(safeBsym, "\"", "");
+      string h4Json  = BuildRatesArrayJson(bsym, PERIOD_H4, 30);
+      string d1Json  = BuildRatesArrayJson(bsym, PERIOD_D1, 20);
+      string safeBsym = SanitizeJsonStr(bsym);
 
       if(added > 0) candlesJson += ",";
       candlesJson += "\"" + canonicalSyms[i] + "\":{\"broker_symbol\":\"" + safeBsym +
-                     "\",\"1h\":" + h1Json + ",\"15m\":" + m15Json + ",\"5m\":" + m5Json + "}";
+                     "\",\"1h\":" + h1Json + ",\"15m\":" + m15Json + ",\"5m\":" + m5Json +
+                     ",\"4h\":" + h4Json + ",\"1d\":" + d1Json + "}";
       added++;
    }
    candlesJson += "}";
 
    if(added == 0) return;
 
-   string company = AccountInfoString(ACCOUNT_COMPANY);
-   string server  = AccountInfoString(ACCOUNT_SERVER);
-   StringReplace(company, "\"", "");
-   StringReplace(server, "\"", "");
+   string company = SanitizeJsonStr(AccountInfoString(ACCOUNT_COMPANY));
+   string server  = SanitizeJsonStr(AccountInfoString(ACCOUNT_SERVER));
 
    string payload = "{\"login\":" + IntegerToString(login) +
                     ",\"broker\":\"" + company +
@@ -874,7 +1115,109 @@ void ExportLiveCandlesFile()
 }
 
 //+------------------------------------------------------------------+
-//| پل ارتباطی محلی فایل برای سرورهای ابری بدون نیاز به WebRequest   |
+//| خروجی تقویم اقتصادی زنده متاتریدر (actual, forecast, previous)   |
+//+------------------------------------------------------------------+
+void ExportLiveCalendarFile()
+{
+   static datetime lastCalExportTime = 0;
+   datetime nowLocal = TimeLocal();
+   if(lastCalExportTime != 0 && (nowLocal - lastCalExportTime) < 60) return;
+
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   if(login <= 0) return;
+
+   datetime serverNow = TimeTradeServer();
+   datetime gmtNow    = TimeGMT();
+   long gmtOffsetSec  = (long)gmtNow - (long)serverNow;
+
+   MqlCalendarValue values[];
+   datetime fromTime = serverNow - 14400; // ۴ ساعت گذشته
+   datetime toTime   = serverNow + 7200;  // ۲ ساعت آینده
+   int count = CalendarValueHistory(values, fromTime, toTime, NULL, NULL);
+   if(count < 0) count = 0;
+
+   string eventsJson = "[";
+   int added = 0;
+
+   for(int i = 0; i < count && added < 80; i++)
+   {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(values[i].event_id, ev)) continue;
+
+      string impStr = "LOW";
+      if(ev.importance == CALENDAR_IMPORTANCE_HIGH)
+         impStr = "HIGH";
+      else if(ev.importance == CALENDAR_IMPORTANCE_MODERATE)
+         impStr = "MODERATE";
+      else
+         continue;
+
+      MqlCalendarCountry country;
+      if(!CalendarCountryById(ev.country_id, country)) continue;
+
+      string curr = country.currency;
+      StringToUpper(curr);
+      if(curr != "USD" && curr != "EUR") continue;
+
+      bool hasActual   = values[i].HasActualValue();
+      bool hasForecast = values[i].HasForecastValue();
+      bool hasPrev     = values[i].HasPreviousValue();
+
+      double actualVal   = hasActual ? values[i].GetActualValue() : 0.0;
+      double forecastVal = hasForecast ? values[i].GetForecastValue() : 0.0;
+      double prevVal     = hasPrev ? values[i].GetPreviousValue() : 0.0;
+
+      if(hasActual && !MathIsValidNumber(actualVal))     { hasActual = false; actualVal = 0.0; }
+      if(hasForecast && !MathIsValidNumber(forecastVal)) { hasForecast = false; forecastVal = 0.0; }
+      if(hasPrev && !MathIsValidNumber(prevVal))         { hasPrev = false; prevVal = 0.0; }
+
+      long utcTs = (long)values[i].time + gmtOffsetSec;
+      string safeTitle = SanitizeJsonStr(ev.name);
+
+      if(added > 0) eventsJson += ",";
+      eventsJson += "{\"event_id\":" + IntegerToString((long)values[i].event_id) +
+                    ",\"currency\":\"" + SanitizeJsonStr(curr) +
+                    "\",\"title\":\"" + safeTitle +
+                    "\",\"impact\":\"" + impStr +
+                    "\",\"time_ts\":" + IntegerToString(utcTs) +
+                    ",\"has_actual\":" + (hasActual ? "true" : "false") +
+                    ",\"has_forecast\":" + (hasForecast ? "true" : "false") +
+                    ",\"has_previous\":" + (hasPrev ? "true" : "false") +
+                    ",\"actual\":" + DoubleToString(actualVal, 4) +
+                    ",\"forecast\":" + DoubleToString(forecastVal, 4) +
+                    ",\"previous\":" + DoubleToString(prevVal, 4) + "}";
+      added++;
+   }
+   eventsJson += "]";
+
+   string company = SanitizeJsonStr(AccountInfoString(ACCOUNT_COMPANY));
+   string server  = SanitizeJsonStr(AccountInfoString(ACCOUNT_SERVER));
+
+   string payload = "{\"login\":" + IntegerToString(login) +
+                    ",\"broker\":\"" + company +
+                    "\",\"server\":\"" + server +
+                    "\",\"events\":" + eventsJson + "}";
+
+   char postData[];
+   int len = StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8);
+   if(len > 0) ArrayResize(postData, len - 1);
+
+   int outSize = ArraySize(postData);
+   if(outSize > 0)
+   {
+      int hOut = FileOpen("ares_calendar_out.tmp", FILE_WRITE | FILE_BIN);
+      if(hOut != INVALID_HANDLE)
+      {
+         FileWriteArray(hOut, postData, 0, outSize);
+         FileClose(hOut);
+         FileMove("ares_calendar_out.tmp", 0, "ares_calendar_out.json", FILE_REWRITE);
+      }
+   }
+   lastCalExportTime = nowLocal;
+}
+
+//+------------------------------------------------------------------+
+//| پل ارتباطی محلی فایل برای سرورهای ابری                           |
 //+------------------------------------------------------------------+
 void SyncViaLocalFileBridge(const char &postData[])
 {
@@ -932,11 +1275,8 @@ void SyncAccountWithServer()
 
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
-   string company = AccountInfoString(ACCOUNT_COMPANY);
-   string server  = AccountInfoString(ACCOUNT_SERVER);
-
-   StringReplace(company, "\"", "");
-   StringReplace(server, "\"", "");
+   string company = SanitizeJsonStr(AccountInfoString(ACCOUNT_COMPANY));
+   string server  = SanitizeJsonStr(AccountInfoString(ACCOUNT_SERVER));
 
    double initialDeposit = 0.0;
    double historyPnL     = CalculateRealHistoryPnL(initialDeposit);
@@ -973,12 +1313,9 @@ void SyncAccountWithServer()
       if(err != lastWebErr)
       {
          lastWebErr = err;
-         Print("⚠️ [ARES Sync Error] HTTP=", res, " LastError=", err, (err == 4014 ? " -> Using Cloud File Bridge" : ""));
+         Print("⚠️ [ARES Sync Fallback] HTTP=", res, " LastError=", err, " -> Using Local File Bridge");
       }
-      if(err == 4014)
-      {
-         SyncViaLocalFileBridge(postData);
-      }
+      SyncViaLocalFileBridge(postData);
    }
 }
 //+------------------------------------------------------------------+

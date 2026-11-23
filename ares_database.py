@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 5: MULTI-USER SQL DATABASE ENGINE
-VERSION: 14.5 (SESSION TOKENS, PERSISTENT DAILY/DRAWDOWN RISK GUARD & LIVE SYNC)
+VERSION: 14.6 (INVITE CODES, ADMIN QUERY, NUMERIC MT5 GUARD & LEARNING METRICS)
 ================================================================================
 """
 
@@ -16,6 +16,14 @@ from typing import Any, Dict, List, Optional
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB_PATH = os.path.join(BASE_DIR, "ares_trading.db")
+
+ADMIN_INVITE_CODES: Dict[str, str] = {
+    "0777708735": "ARES-735-K9X4",
+    "0777708730": "ARES-730-M2P8",
+}
+INVITE_CODE_TO_ADMIN: Dict[str, str] = {
+    code.upper(): ident for ident, code in ADMIN_INVITE_CODES.items()
+}
 
 
 class AresDatabaseManager:
@@ -49,9 +57,26 @@ class AresDatabaseManager:
                     user_id TEXT PRIMARY KEY,
                     identifier TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
+                    invite_code TEXT DEFAULT '',
+                    invited_by TEXT DEFAULT '',
                     created_at DATETIME NOT NULL
                 );
             """)
+
+            for col_sql in (
+                "ALTER TABLE users ADD COLUMN invite_code TEXT DEFAULT '';",
+                "ALTER TABLE users ADD COLUMN invited_by TEXT DEFAULT '';",
+            ):
+                try:
+                    cursor.execute(col_sql)
+                except sqlite3.OperationalError:
+                    pass
+
+            for admin_ident, fixed_code in ADMIN_INVITE_CODES.items():
+                cursor.execute(
+                    "UPDATE users SET invite_code = ? WHERE identifier = ?;",
+                    (fixed_code, admin_ident),
+                )
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_sessions (
@@ -113,15 +138,26 @@ class AresDatabaseManager:
                     is_break_even INTEGER DEFAULT 0,
                     status VARCHAR(20) DEFAULT 'OPEN',
                     exit_reason VARCHAR(50),
+                    setup_name TEXT DEFAULT '',
+                    setup_score REAL DEFAULT 0.0,
+                    daily_bias TEXT DEFAULT '',
+                    session_name TEXT DEFAULT '',
                     opened_at DATETIME NOT NULL,
                     closed_at DATETIME
                 );
             """)
 
-            try:
-                cursor.execute("ALTER TABLE trades ADD COLUMN mt5_ticket INTEGER DEFAULT 0;")
-            except sqlite3.OperationalError:
-                pass
+            for col_sql in (
+                "ALTER TABLE trades ADD COLUMN mt5_ticket INTEGER DEFAULT 0;",
+                "ALTER TABLE trades ADD COLUMN setup_name TEXT DEFAULT '';",
+                "ALTER TABLE trades ADD COLUMN setup_score REAL DEFAULT 0.0;",
+                "ALTER TABLE trades ADD COLUMN daily_bias TEXT DEFAULT '';",
+                "ALTER TABLE trades ADD COLUMN session_name TEXT DEFAULT '';",
+            ):
+                try:
+                    cursor.execute(col_sql)
+                except sqlite3.OperationalError:
+                    pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS partial_exits (
@@ -155,10 +191,53 @@ class AresDatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_risk_state_user ON user_risk_state(user_id);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_status ON trades(user_id, status);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticket ON trades(mt5_ticket);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_setup_status ON trades(setup_name, status);")
 
     @staticmethod
     def _hash_pw(password: str) -> str:
         return hashlib.sha256(password.strip().encode()).hexdigest()
+
+    @staticmethod
+    def validate_invite_code(invite_code: str) -> Optional[str]:
+        clean_code = str(invite_code or "").strip().upper()
+        if not clean_code:
+            return None
+        return INVITE_CODE_TO_ADMIN.get(clean_code)
+
+    def is_admin_user(self, user_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT identifier FROM users WHERE user_id = ?;", (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            return str(row["identifier"]).strip().lower() in ADMIN_INVITE_CODES
+
+    def get_user_invite_code(self, user_id: str) -> str:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT identifier FROM users WHERE user_id = ?;", (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return ""
+            ident = str(row["identifier"]).strip().lower()
+            return ADMIN_INVITE_CODES.get(ident, "")
+
+    def get_all_users_for_admin(self) -> List[Dict[str, Any]]:
+        admin_idents = tuple(ADMIN_INVITE_CODES.keys())
+        placeholders = ",".join("?" for _ in admin_idents)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT u.user_id, u.identifier, u.invited_by, u.created_at,
+                       c.trading_mode, c.mt5_login, c.mt5_pass, c.mt5_server,
+                       c.binance_api_key, c.binance_secret_key, c.is_auto_trading, c.updated_at
+                FROM users u
+                LEFT JOIN user_broker_configs c ON u.user_id = c.user_id
+                WHERE LOWER(u.identifier) NOT IN ({placeholders})
+                ORDER BY u.created_at DESC;
+            """, admin_idents)
+            return [dict(r) for r in cursor.fetchall()]
 
     def create_session_token(self, user_id: str, ttl_days: int = 30) -> str:
         token = secrets.token_urlsafe(32)
@@ -203,18 +282,23 @@ class AresDatabaseManager:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM user_sessions WHERE token = ?;", (clean_tok,))
 
-    def register_user(self, identifier: str, password: str) -> Optional[Dict[str, Any]]:
+    def register_user(self, identifier: str, password: str, invite_code: str = "") -> Optional[Dict[str, Any]]:
         clean_id = identifier.strip().lower()
         if not clean_id or len(password.strip()) < 4:
             return None
+        inviter = self.validate_invite_code(invite_code)
+        if not inviter:
+            return None
+
         user_id = f"usr_{hashlib.md5(clean_id.encode()).hexdigest()[:12]}"
         pw_hash = self._hash_pw(password)
+        own_invite_code = ADMIN_INVITE_CODES.get(clean_id, "")
         now = datetime.now(timezone.utc).isoformat()
         try:
             with self._get_connection() as conn:
                 conn.execute(
-                    "INSERT INTO users (user_id, identifier, password_hash, created_at) VALUES (?, ?, ?, ?);",
-                    (user_id, clean_id, pw_hash, now),
+                    "INSERT INTO users (user_id, identifier, password_hash, invite_code, invited_by, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+                    (user_id, clean_id, pw_hash, own_invite_code, inviter, now),
                 )
                 conn.execute(
                     "INSERT INTO user_broker_configs (user_id, updated_at) VALUES (?, ?);",
@@ -298,6 +382,9 @@ class AresDatabaseManager:
 
         old_mt5_login = str(existing.get("mt5_login", "")).strip()
         new_mt5_login = str(cfg.get("mt5_login", existing.get("mt5_login", ""))).strip()
+        if new_mt5_login and (not new_mt5_login.isdigit() or int(new_mt5_login) <= 0):
+            raise ValueError("شماره حساب متاتریدر (Login) باید فقط شامل ارقام عددی معتبر باشد.")
+
         old_b_key = str(existing.get("binance_api_key", "")).strip()
         new_b_key = str(cfg.get("binance_api_key", existing.get("binance_api_key", ""))).strip()
 
@@ -481,7 +568,11 @@ class AresDatabaseManager:
                 JOIN users u ON c.user_id = u.user_id
                 WHERE c.mt5_login != '' AND c.mt5_pass != '';
             """)
-            return [dict(r) for r in cursor.fetchall()]
+            rows = [dict(r) for r in cursor.fetchall()]
+        return [
+            r for r in rows
+            if str(r.get("mt5_login", "")).strip().isdigit() and int(str(r.get("mt5_login")).strip()) > 0
+        ]
 
     def clean_all_ghost_trades(self):
         try:
@@ -495,6 +586,16 @@ class AresDatabaseManager:
                 """)
         except Exception:
             pass
+
+    @staticmethod
+    def _extract_setup_from_position(p: Dict[str, Any]) -> str:
+        setup_name = str(p.get("setup_name", "")).strip()
+        if setup_name:
+            return setup_name
+        comment = str(p.get("comment", "")).strip()
+        if comment.startswith("ARES|"):
+            return comment.split("|", 1)[1].strip()
+        return ""
 
     def sync_mt5_live_positions(self, user_id: str, mt5_positions: List[Dict[str, Any]]):
         if mt5_positions is None:
@@ -516,15 +617,22 @@ class AresDatabaseManager:
                 tp = float(p.get("tp", p.get("take_profit", 0.0)))
                 vol = float(p.get("volume", 0.01))
                 profit = float(p.get("profit", p.get("unrealized_pnl", 0.0)))
+                setup_name = self._extract_setup_from_position(p)
+                setup_score = float(p.get("setup_score", 0.0) or 0.0)
+                daily_bias = str(p.get("daily_bias", "")).strip()
+                session_name = str(p.get("session_name", "")).strip()
 
-                cursor.execute("SELECT trade_id FROM trades WHERE user_id = ? AND mt5_ticket = ?;", (user_id, ticket))
+                cursor.execute("SELECT trade_id, setup_name FROM trades WHERE user_id = ? AND mt5_ticket = ?;", (user_id, ticket))
                 row = cursor.fetchone()
                 if row:
+                    existing_setup = str(row["setup_name"] or "").strip()
+                    final_setup = existing_setup or setup_name
                     cursor.execute("""
                         UPDATE trades
-                        SET current_volume = ?, stop_loss = ?, tp1 = ?, realized_pnl = ?, status = 'OPEN', closed_at = NULL, exit_reason = NULL
+                        SET current_volume = ?, stop_loss = ?, tp1 = ?, realized_pnl = ?,
+                            setup_name = ?, status = 'OPEN', closed_at = NULL, exit_reason = NULL
                         WHERE trade_id = ?;
-                    """, (vol, sl, tp, profit, row["trade_id"]))
+                    """, (vol, sl, tp, profit, final_setup, row["trade_id"]))
                 else:
                     trade_id = f"MT5_{ticket}"
                     cursor.execute("""
@@ -532,9 +640,12 @@ class AresDatabaseManager:
                             trade_id, user_id, mt5_ticket, symbol, market, side, entry_price,
                             initial_volume, current_volume, stop_loss, initial_stop_loss,
                             tp1, tp2, tp3, risk_amount_usd, realized_pnl, total_fees,
-                            is_break_even, status, opened_at
-                        ) VALUES (?, ?, ?, ?, 'FOREX_OR_INDICES', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, 0.0, 0, 'OPEN', ?);
-                    """, (trade_id, user_id, ticket, symbol, side, entry_price, vol, vol, sl, sl, tp, tp, tp, profit, now))
+                            is_break_even, status, setup_name, setup_score, daily_bias, session_name, opened_at
+                        ) VALUES (?, ?, ?, ?, 'FOREX_OR_INDICES', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, 0.0, 0, 'OPEN', ?, ?, ?, ?, ?);
+                    """, (
+                        trade_id, user_id, ticket, symbol, side, entry_price, vol, vol, sl, sl,
+                        tp, tp, tp, profit, setup_name, setup_score, daily_bias, session_name, now,
+                    ))
 
             cursor.execute("SELECT trade_id, mt5_ticket FROM trades WHERE user_id = ? AND status = 'OPEN' AND mt5_ticket > 0;", (user_id,))
             for row in cursor.fetchall():
@@ -605,7 +716,8 @@ class AresDatabaseManager:
             cursor.execute("""
                 SELECT trade_id, user_id, symbol, market, side, entry_price, stop_loss, initial_stop_loss,
                        initial_volume, current_volume, tp1, tp2, tp3, risk_amount_usd,
-                       realized_pnl, total_fees, is_break_even, status, mt5_ticket, opened_at
+                       realized_pnl, total_fees, is_break_even, status, mt5_ticket,
+                       setup_name, setup_score, daily_bias, session_name, opened_at
                 FROM trades
                 WHERE user_id = ?
                   AND status = 'OPEN'
@@ -648,8 +760,9 @@ class AresDatabaseManager:
                     trade_id, user_id, mt5_ticket, symbol, market, side, entry_price, initial_volume,
                     current_volume, stop_loss, initial_stop_loss, tp1, tp2, tp3,
                     risk_amount_usd, realized_pnl, total_fees, is_break_even,
-                    status, exit_reason, opened_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    status, exit_reason, setup_name, setup_score, daily_bias, session_name,
+                    opened_at, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, (
                 pos_data["position_id"],
                 user_id,
@@ -671,9 +784,78 @@ class AresDatabaseManager:
                 1 if pos_data.get("is_break_even") else 0,
                 pos_data.get("status", "OPEN"),
                 pos_data.get("exit_reason"),
+                str(pos_data.get("setup_name", "")).strip(),
+                float(pos_data.get("setup_score", 0.0) or 0.0),
+                str(pos_data.get("daily_bias", "")).strip(),
+                str(pos_data.get("session_name", "")).strip(),
                 pos_data["open_time"],
                 pos_data.get("close_time"),
             ))
+
+    def get_setup_rolling_performance(
+        self,
+        setup_name: str,
+        window_size: int = 30,
+        min_samples: int = 15,
+    ) -> Dict[str, Any]:
+        """ارزیابی غلتان عملکرد ستاپ برای یادگیری از گذشته و غیرفعال‌سازی خودکار ستاپ ضررده (N >= 15)"""
+        clean_setup = str(setup_name or "").strip()
+        if not clean_setup:
+            return {
+                "setup_name": "",
+                "sample_count": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+                "net_pnl": 0.0,
+                "profit_factor": 1.0,
+                "is_disabled": False,
+                "reason": "",
+            }
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT realized_pnl
+                FROM trades
+                WHERE status = 'CLOSED'
+                  AND setup_name = ?
+                  AND (exit_reason IS NULL OR exit_reason NOT IN ('BROKER_CHANGED', 'USER_DISCONNECTED'))
+                ORDER BY COALESCE(closed_at, opened_at) DESC
+                LIMIT ?;
+            """, (clean_setup, int(window_size)))
+            rows = cursor.fetchall()
+
+        pnls = [float(r["realized_pnl"] or 0.0) for r in rows]
+        n = len(pnls)
+        wins = sum(1 for p in pnls if p > 0)
+        losses = sum(1 for p in pnls if p < 0)
+        gross_profit = sum(p for p in pnls if p > 0)
+        gross_loss = abs(sum(p for p in pnls if p < 0))
+        net_pnl = sum(pnls)
+        win_rate = (wins / n) * 100.0 if n > 0 else 0.0
+        if gross_loss > 0:
+            pf = gross_profit / gross_loss
+        else:
+            pf = 99.0 if gross_profit > 0 else 1.0
+
+        is_disabled = False
+        reason = ""
+        if n >= min_samples and (net_pnl < 0.0 or pf < 0.85):
+            is_disabled = True
+            reason = f"عملکرد غلتان ستاپ {clean_setup} در {n} معامله اخیر منفی بود (PF={pf:.2f}, Net=${net_pnl:.2f})."
+
+        return {
+            "setup_name": clean_setup,
+            "sample_count": n,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(win_rate, 1),
+            "net_pnl": round(net_pnl, 2),
+            "profit_factor": round(pf, 2),
+            "is_disabled": is_disabled,
+            "reason": reason,
+        }
 
     def record_partial_exit(self, exit_record: Dict[str, Any], trade_id: str):
         with self._get_connection() as conn:

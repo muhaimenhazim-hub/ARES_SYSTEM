@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 15.2 (MT5 LIVE CANDLE BRIDGE WITH PER-SYMBOL SOURCE LOCK)
+VERSION: 15.3 (UNLIMITED NUMERIC MT5, H4/D1 CANDLE BRIDGE & CALENDAR BRIDGE)
 ================================================================================
 """
 
@@ -24,7 +24,9 @@ BASE_MT5_DIR = "/root/.wine/drive_c/Program Files/MetaTrader 5"
 GLOBAL_CONFIG_SRC = "/root/mt5_config"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 LIVE_CANDLES_FILE = os.path.join(PROJECT_DIR, "ares_live_candles.json")
+LIVE_CALENDAR_FILE = os.path.join(PROJECT_DIR, "ares_live_calendar.json")
 CANDLE_SOURCE_LOCK_SECONDS = 75.0
+CALENDAR_SOURCE_LOCK_SECONDS = 75.0
 
 # جدول نگاشت هوشمند نام استاندارد بروکرهای جهانی
 UNIVERSAL_BROKER_MAP = {
@@ -46,6 +48,7 @@ class AresMT5MultiManager:
         os.makedirs(INSTANCES_DIR, exist_ok=True)
         self._poisoned_hashes = self._compute_poisoned_hashes()
         self._live_candles_state: Dict[str, Any] = self._load_live_candles_state()
+        self._live_calendar_state: Dict[str, Any] = self._load_live_calendar_state()
 
     @staticmethod
     def _file_md5(path: str) -> str:
@@ -85,7 +88,7 @@ class AresMT5MultiManager:
 
     @staticmethod
     def _cred_hash(login: str, password: str, server: str, ea_stamp: str = "0") -> str:
-        raw = f"V15.2|{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
+        raw = f"V15.3|{login}|{password}|{server}|{ea_stamp}".encode("utf-8")
         return hashlib.md5(raw).hexdigest()
 
     def ensure_base_ea_compiled(self):
@@ -303,7 +306,7 @@ name=Main
         server_raw = str(user.get("mt5_server", "MetaQuotes-Demo")).strip() or "MetaQuotes-Demo"
         identifier = str(user.get("identifier", "")).strip() or login
 
-        if not login or not password:
+        if not login or not password or not login.isdigit() or int(login) <= 0:
             return None
 
         self.ensure_base_ea_compiled()
@@ -508,8 +511,32 @@ Period=M15
                 except Exception:
                     pass
 
+    def _load_live_calendar_state(self) -> Dict[str, Any]:
+        if os.path.exists(LIVE_CALENDAR_FILE):
+            try:
+                with open(LIVE_CALENDAR_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and isinstance(data.get("events"), list):
+                    return data
+            except Exception:
+                pass
+        return {"updated_ts": 0.0, "login": "", "events": []}
+
+    def _save_live_calendar_state(self) -> None:
+        tmp_path = f"{LIVE_CALENDAR_FILE}.{os.getpid()}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._live_calendar_state, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp_path, LIVE_CALENDAR_FILE)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
     def _ingest_instance_candles(self, files_dir: str) -> bool:
-        """خواندن کندل‌های لحظه‌ای متاتریدر و ذخیره اتمی در ares_live_candles.json با قفل منبع هر نماد"""
+        """خواندن کندل‌های لحظه‌ای متاتریدر (5m/15m/1h/4h/1d) و ذخیره اتمی در ares_live_candles.json با قفل منبع هر نماد"""
         candles_file = os.path.join(files_dir, "ares_candles_out.json")
         if not os.path.exists(candles_file):
             return False
@@ -546,6 +573,8 @@ Period=M15
             r_1h = tf_data.get("1h")
             r_15m = tf_data.get("15m")
             r_5m = tf_data.get("5m")
+            r_4h = tf_data.get("4h")
+            r_1d = tf_data.get("1d")
             if not (
                 isinstance(r_1h, list) and len(r_1h) >= 10
                 and isinstance(r_15m, list) and len(r_15m) >= 15
@@ -571,6 +600,8 @@ Period=M15
                 "1h": r_1h,
                 "15m": r_15m,
                 "5m": r_5m,
+                "4h": r_4h if isinstance(r_4h, list) else [],
+                "1d": r_1d if isinstance(r_1d, list) else [],
             }
             updated_any = True
 
@@ -579,8 +610,57 @@ Period=M15
             self._save_live_candles_state()
         return updated_any
 
+    def _ingest_instance_calendar(self, files_dir: str) -> bool:
+        """خواندن تقویم اقتصادی زنده متاتریدر (actual/forecast/previous) و ذخیره اتمی در ares_live_calendar.json"""
+        cal_file = os.path.join(files_dir, "ares_calendar_out.json")
+        if not os.path.exists(cal_file):
+            return False
+
+        reading_file = os.path.join(files_dir, "ares_calendar_out.reading")
+        payload = None
+        try:
+            os.replace(cal_file, reading_file)
+            with open(reading_file, "r", encoding="utf-8", errors="ignore") as f:
+                payload = json.load(f)
+        except Exception:
+            return False
+        finally:
+            if os.path.exists(reading_file):
+                try:
+                    os.remove(reading_file)
+                except Exception:
+                    pass
+
+        if not isinstance(payload, dict):
+            return False
+        login_str = str(payload.get("login", "")).strip()
+        events = payload.get("events")
+        if login_str in ("", "0") or not isinstance(events, list):
+            return False
+
+        now_ts = time.time()
+        locked_login = str(self._live_calendar_state.get("login", "")).strip()
+        locked_ts = float(self._live_calendar_state.get("updated_ts", 0.0) or 0.0)
+        existing_events = self._live_calendar_state.get("events", [])
+
+        if not events and existing_events and (now_ts - locked_ts) < CALENDAR_SOURCE_LOCK_SECONDS:
+            return False
+
+        if locked_login and locked_login != login_str and (now_ts - locked_ts) < CALENDAR_SOURCE_LOCK_SECONDS:
+            return False
+
+        self._live_calendar_state = {
+            "updated_ts": now_ts,
+            "login": login_str,
+            "broker": str(payload.get("broker", "")),
+            "server": str(payload.get("server", "")),
+            "events": events,
+        }
+        self._save_live_calendar_state()
+        return True
+
     def process_local_file_bridges(self):
-        """پل ارتباطی فایل محلی برای انتقال تیک‌ها، کندل‌های لحظه‌ای و دستورات متاتریدرهای ابری بدون محدودیت ۴۰۱۴"""
+        """پل ارتباطی فایل محلی برای انتقال تیک‌ها، کندل‌های لحظه‌ای، تقویم اقتصادی و دستورات متاتریدرهای ابری بدون محدودیت ۴۰۱۴"""
         if not os.path.exists(INSTANCES_DIR):
             return
 
@@ -590,6 +670,7 @@ Period=M15
         for entry in os.listdir(INSTANCES_DIR):
             files_dir = os.path.join(INSTANCES_DIR, entry, "MQL5", "Files")
             self._ingest_instance_candles(files_dir)
+            self._ingest_instance_calendar(files_dir)
 
             out_file = os.path.join(files_dir, "ares_sync_out.json")
             if not os.path.exists(out_file):
@@ -656,7 +737,9 @@ Period=M15
         active_logins = {
             str(u.get("mt5_login", "")).strip()
             for u in accounts
-            if str(u.get("mt5_login", "")).strip() and str(u.get("mt5_pass", "")).strip()
+            if str(u.get("mt5_login", "")).strip().isdigit()
+            and int(str(u.get("mt5_login", "")).strip()) > 0
+            and str(u.get("mt5_pass", "")).strip()
         }
 
         if os.path.exists(INSTANCES_DIR):
@@ -672,7 +755,7 @@ Period=M15
             password = str(user.get("mt5_pass", "")).strip()
             server_raw = str(user.get("mt5_server", "MetaQuotes-Demo")).strip() or "MetaQuotes-Demo"
             server_endpoint = UNIVERSAL_BROKER_MAP.get(server_raw.lower(), server_raw)
-            if not login or not password:
+            if not login or not password or not login.isdigit() or int(login) <= 0:
                 continue
 
             if self.is_login_running(login):
@@ -695,7 +778,7 @@ Period=M15
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.2 - پل کندل لحظه‌ای متاتریدر با قفل منبع هر نماد) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.3 - نامحدود، پل کندل H4/D1 و پل تقویم اقتصادی) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         bridge_thread = threading.Thread(target=self.run_file_bridge_loop, daemon=True)

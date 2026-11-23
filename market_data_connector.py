@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 1: UNIFIED MULTI-MARKET DATA CONNECTOR (Crypto & Forex & Indices)
-VERSION: 14.1 (MT5 LIVE CANDLES PRIORITY <=90S & YAHOO/PAXG AUTO-FALLBACK)
+VERSION: 14.2 (MT5 LIVE CANDLES WITH H4/D1 SUPPORT & YAHOO/PAXG AUTO-FALLBACK)
 ================================================================================
 """
 
@@ -34,12 +34,18 @@ class BinanceFuturesConnector:
             "timeout": 7000,
         })
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "15m",
+        limit: int = 100,
+        min_len: int = 15,
+    ) -> Optional[pd.DataFrame]:
         base = symbol.replace("USDT", "")
         formatted_symbol = f"{base}/USDT:USDT"
         try:
             raw = self.exchange.fetch_ohlcv(symbol=formatted_symbol, timeframe=timeframe, limit=limit)
-            if not raw or len(raw) < 15:
+            if not raw or len(raw) < min_len:
                 return None
             df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -76,14 +82,22 @@ class MT5ForexConnector:
     def __init__(self):
         print("🌐 دیتای زنده فارکس، انس طلا (XAUUSD) و شاخص‌ها بر بستر مستقل کلود فعال شد.")
 
-    def _fetch_cloud_ohlcv(self, standard_symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
+    def _fetch_cloud_ohlcv(
+        self,
+        standard_symbol: str,
+        timeframe: str = "15m",
+        limit: int = 100,
+        min_len: int = 15,
+    ) -> Optional[pd.DataFrame]:
         clean_sym = standard_symbol.upper().replace(" ", "").replace("/", "").replace(".", "")
         cloud_sym = self.SYMBOL_MAP.get(standard_symbol, self.SYMBOL_MAP.get(clean_sym, f"{clean_sym}=X"))
 
-        range_map = {"5m": "5d", "15m": "5d", "1h": "1mo"}
+        is_4h_resample = (timeframe == "4h")
+        api_interval = "1h" if is_4h_resample else timeframe
+        range_map = {"5m": "5d", "15m": "5d", "1h": "1mo", "4h": "1mo", "1d": "3mo"}
         fetch_range = range_map.get(timeframe, "5d")
 
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{cloud_sym}?interval={timeframe}&range={fetch_range}"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{cloud_sym}?interval={api_interval}&range={fetch_range}"
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -93,7 +107,7 @@ class MT5ForexConnector:
             with urllib.request.urlopen(req, timeout=6.0) as response:
                 payload = json.loads(response.read().decode())
                 if not payload.get("chart", {}).get("result"):
-                    return self._fetch_gold_backup(timeframe, limit) if ("XAU" in clean_sym or "GOLD" in clean_sym) else None
+                    return self._fetch_gold_backup(timeframe, limit, min_len=min_len) if ("XAU" in clean_sym or "GOLD" in clean_sym) else None
 
                 result = payload["chart"]["result"][0]
                 timestamps = result.get("timestamp", [])
@@ -111,23 +125,43 @@ class MT5ForexConnector:
                     "volume": quote.get("volume", [0] * len(timestamps)),
                 }).dropna()
 
-                if len(df) < 15:
-                    return None
-
                 for col in ["open", "high", "low", "close", "volume"]:
                     df[col] = df[col].astype(np.float64)
+
+                if is_4h_resample:
+                    df = (
+                        df.set_index("timestamp")
+                        .resample("4h")
+                        .agg({
+                            "open": "first",
+                            "high": "max",
+                            "low": "min",
+                            "close": "last",
+                            "volume": "sum",
+                        })
+                        .dropna()
+                        .reset_index()
+                    )
+
+                if len(df) < min_len:
+                    return None
 
                 return df.tail(limit)[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
         except Exception:
             if "XAU" in clean_sym or "GOLD" in clean_sym:
-                return self._fetch_gold_backup(timeframe, limit)
+                return self._fetch_gold_backup(timeframe, limit, min_len=min_len)
             return None
 
-    def _fetch_gold_backup(self, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
+    def _fetch_gold_backup(
+        self,
+        timeframe: str = "15m",
+        limit: int = 100,
+        min_len: int = 15,
+    ) -> Optional[pd.DataFrame]:
         try:
             ex = ccxt.binance({"options": {"defaultType": "future"}, "enableRateLimit": True, "timeout": 5000})
             raw = ex.fetch_ohlcv("PAXG/USDT:USDT", timeframe=timeframe, limit=limit)
-            if not raw or len(raw) < 15:
+            if not raw or len(raw) < min_len:
                 return None
             df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -137,8 +171,14 @@ class MT5ForexConnector:
         except Exception:
             return None
 
-    def fetch_ohlcv(self, standard_symbol: str, timeframe: str = "15m", limit: int = 100) -> Optional[pd.DataFrame]:
-        return self._fetch_cloud_ohlcv(standard_symbol, timeframe, limit)
+    def fetch_ohlcv(
+        self,
+        standard_symbol: str,
+        timeframe: str = "15m",
+        limit: int = 100,
+        min_len: int = 15,
+    ) -> Optional[pd.DataFrame]:
+        return self._fetch_cloud_ohlcv(standard_symbol, timeframe, limit, min_len=min_len)
 
 
 class AresUnifiedDataService:
@@ -191,6 +231,9 @@ class AresUnifiedDataService:
             if df_htf is None or df_mtf is None or df_ltf is None:
                 return None
 
+            df_h4 = self._rates_to_dataframe(sym_entry.get("4h"), min_len=8)
+            df_d1 = self._rates_to_dataframe(sym_entry.get("1d"), min_len=4)
+
             current_price = float(df_ltf.iloc[-1]["close"])
             if current_price <= 0.0:
                 return None
@@ -203,6 +246,8 @@ class AresUnifiedDataService:
                 "df_htf": df_htf,
                 "df_mtf": df_mtf,
                 "df_ltf": df_ltf,
+                "df_h4": df_h4,
+                "df_d1": df_d1,
                 "source": source_label,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -223,6 +268,8 @@ class AresUnifiedDataService:
             df_ltf = self.binance.fetch_ohlcv(symbol, timeframe="5m", limit=60)
             if df_htf is None or df_mtf is None or df_ltf is None:
                 return None
+            df_h4 = self.binance.fetch_ohlcv(symbol, timeframe="4h", limit=30, min_len=8)
+            df_d1 = self.binance.fetch_ohlcv(symbol, timeframe="1d", limit=20, min_len=4)
             current_price = float(df_ltf.iloc[-1]["close"])
             bundle = {
                 "symbol": symbol,
@@ -231,6 +278,8 @@ class AresUnifiedDataService:
                 "df_htf": df_htf,
                 "df_mtf": df_mtf,
                 "df_ltf": df_ltf,
+                "df_h4": df_h4,
+                "df_d1": df_d1,
                 "source": "BINANCE_FUTURES",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -251,6 +300,8 @@ class AresUnifiedDataService:
         if df_htf is None or df_mtf is None or df_ltf is None:
             return None
 
+        df_h4 = self.mt5.fetch_ohlcv(symbol, timeframe="4h", limit=30, min_len=8)
+        df_d1 = self.mt5.fetch_ohlcv(symbol, timeframe="1d", limit=20, min_len=4)
         current_price = float(df_ltf.iloc[-1]["close"])
 
         bundle = {
@@ -260,6 +311,8 @@ class AresUnifiedDataService:
             "df_htf": df_htf,
             "df_mtf": df_mtf,
             "df_ltf": df_ltf,
+            "df_h4": df_h4,
+            "df_d1": df_d1,
             "source": "YAHOO_BACKUP",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }

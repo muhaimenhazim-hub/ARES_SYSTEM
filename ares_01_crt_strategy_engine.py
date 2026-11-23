@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 01: CRT STRATEGY ENGINE (Candle Range Theory)
-VERSION: 14.1 (POST-SWEEP DISPLACEMENT & RETEST-PERSISTENT CAUSAL MSS)
+VERSION: 14.2 (H1-M15 TIME ALIGNMENT & CLOSED-CANDLES-ONLY EVALUATION)
 ================================================================================
 """
 
@@ -133,6 +133,20 @@ class CRTStrategyEngine:
         self.displacement_atr_mult = displacement_atr_mult
         self.displacement_body_ratio = displacement_body_ratio
         self.swing_lookback = swing_lookback
+
+    @staticmethod
+    def _normalize_ts(val: object) -> pd.Timestamp:
+        ts = pd.to_datetime(val)
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.tz_convert("UTC").tz_localize(None)
+        return ts
+
+    @staticmethod
+    def _normalize_ts_series(series: pd.Series) -> pd.Series:
+        ts = pd.to_datetime(series)
+        if getattr(ts.dt, "tz", None) is not None:
+            ts = ts.dt.tz_convert("UTC").dt.tz_localize(None)
+        return ts
 
     @staticmethod
     def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -270,7 +284,7 @@ class CRTStrategyEngine:
         timeframes_used = {"HTF": htf_label, "MTF": mtf_label, "LTF": ltf_label}
 
         ref_range = self.identify_reference_range(df_htf, timeframe_label=htf_label)
-        if ref_range is None or df_mtf is None or df_ltf is None or len(df_mtf) < 12 or len(df_ltf) < 12:
+        if ref_range is None or df_mtf is None or df_ltf is None or len(df_mtf) < 13 or len(df_ltf) < 13:
             return CRTAnalysisResult(
                 analysis_id=analysis_id,
                 symbol=symbol,
@@ -291,10 +305,42 @@ class CRTStrategyEngine:
                 rejection_evidence=["داده‌های کندلی جهت تحلیل کامل ستاپ کافی نیست."],
             )
 
-        atr_series_mtf = self.calculate_atr(df_mtf)
+        # بررسی منحصراً روی کندل‌های بسته‌شده (حذف کندل در حال تشکیل iloc[-1])
+        df_mtf_closed = df_mtf.iloc[:-1].reset_index(drop=True)
+        df_ltf_closed = df_ltf.iloc[:-1].reset_index(drop=True)
+
+        # هم‌ترازی زمانی کندل مرجع H1 با کندل‌های بسته‌شده M15 بعد از بسته شدن کندل مرجع
+        ref_open_ts = self._normalize_ts(ref_range.open_time)
+        next_htf_ts = self._normalize_ts(df_htf.iloc[-1]["timestamp"])
+        ref_close_ts = next_htf_ts if next_htf_ts > ref_open_ts else (ref_open_ts + pd.Timedelta(hours=1))
+
+        mtf_ts_series = self._normalize_ts_series(df_mtf_closed["timestamp"])
+        recent_mtf = df_mtf_closed[mtf_ts_series >= ref_close_ts].tail(12)
+
+        if recent_mtf.empty:
+            return CRTAnalysisResult(
+                analysis_id=analysis_id,
+                symbol=symbol,
+                market=market,
+                direction="NONE",
+                timeframes_used=timeframes_used,
+                ref_high=ref_range.high,
+                ref_low=ref_range.low,
+                ref_mid=ref_range.midpoint,
+                sweep_status="NONE",
+                sweep_penetration=0.0,
+                closed_inside=False,
+                mss_status="NONE",
+                mss_level=None,
+                displacement_status="NONE",
+                displacement_strength=0.0,
+                status="NO_SETUP",
+                rejection_evidence=["هنوز کندل بسته‌شده M15 پس از بسته شدن کندل مرجع H1 ثبت نشده است."],
+            )
+
+        atr_series_mtf = self.calculate_atr(df_mtf_closed)
         current_atr = float(atr_series_mtf.iloc[-1]) if not pd.isna(atr_series_mtf.iloc[-1]) else 1.0
 
-        recent_mtf = df_mtf.tail(12)
         confirmations: List[str] = [f"کندل مرجع {htf_label} شناسایی شد."]
         rejections: List[str] = []
 
@@ -303,6 +349,8 @@ class CRTStrategyEngine:
         sweep_penetration = 0.0
         closed_inside = False
 
+        last_closed_mtf = recent_mtf.iloc[-1]
+
         lowest_mtf = float(recent_mtf["low"].min())
         if lowest_mtf < ref_range.low:
             penetration = ref_range.low - lowest_mtf
@@ -310,7 +358,6 @@ class CRTStrategyEngine:
             max_valid = self.max_sweep_atr_mult * current_atr
 
             if min_valid <= penetration <= max_valid:
-                last_closed_mtf = df_mtf.iloc[-2]
                 if float(last_closed_mtf["close"]) > ref_range.low:
                     bullish_sweep_detected = True
                     closed_inside = True
@@ -326,7 +373,6 @@ class CRTStrategyEngine:
             max_valid = self.max_sweep_atr_mult * current_atr
 
             if min_valid <= penetration <= max_valid:
-                last_closed_mtf = df_mtf.iloc[-2]
                 if float(last_closed_mtf["close"]) < ref_range.high:
                     bearish_sweep_detected = True
                     closed_inside = True
@@ -362,13 +408,13 @@ class CRTStrategyEngine:
                 rejection_evidence=["هیچ سویپ معتبری در مرزهای کندل مرجع مشاهده نشد."],
             )
 
-        # بررسی مومنتوم (Displacement) در کندل‌های بسته‌شده از زمان سویپ تا آخرین کندل بسته (حفظ تاییدیه هنگام پولبک)
+        # بررسی مومنتوم (Displacement) در کندل‌های بسته‌شده از زمان سویپ تا آخرین کندل بسته
         if direction == "BUY":
             sweep_pos = int(np.argmin(recent_mtf["low"].to_numpy()))
         else:
             sweep_pos = int(np.argmax(recent_mtf["high"].to_numpy()))
 
-        disp_window = recent_mtf.iloc[sweep_pos:-1] if sweep_pos < (len(recent_mtf) - 1) else df_mtf.iloc[-2:-1]
+        disp_window = recent_mtf.iloc[sweep_pos:]
         is_disp = False
         disp_strength = 0.0
         for _, row in disp_window.iterrows():
@@ -383,7 +429,7 @@ class CRTStrategyEngine:
             if is_dir_candle and cand_disp:
                 is_disp = True
         if disp_strength == 0.0:
-            _, disp_strength = self.detect_displacement(df_mtf.iloc[-2], current_atr)
+            _, disp_strength = self.detect_displacement(last_closed_mtf, current_atr)
 
         displacement_status = "CONFIRMED" if is_disp else "WEAK"
         if is_disp:
@@ -391,19 +437,19 @@ class CRTStrategyEngine:
         else:
             rejections.append("مومنتوم حرکت برگشتی (Displacement) کافی نیست.")
 
-        swing_highs_ltf, swing_lows_ltf = self.detect_swings_causal(df_ltf)
+        swing_highs_ltf, swing_lows_ltf = self.detect_swings_causal(df_ltf_closed)
         mss_status = "NONE"
         mss_level = None
 
         if direction == "BUY":
             high_indices = np.where(swing_highs_ltf)[0]
             for s_idx in reversed(high_indices[-3:]):
-                target_level = float(df_ltf.iloc[s_idx]["high"])
-                post_swing = df_ltf.iloc[s_idx + 1:]
+                target_level = float(df_ltf_closed.iloc[s_idx]["high"])
+                post_swing = df_ltf_closed.iloc[s_idx + 1:]
                 if (
                     len(post_swing) > 0
                     and float(post_swing["close"].max()) > target_level
-                    and float(df_ltf.iloc[-1]["close"]) > ref_range.low
+                    and float(df_ltf_closed.iloc[-1]["close"]) > ref_range.low
                 ):
                     mss_status = "CONFIRMED"
                     mss_level = target_level
@@ -412,12 +458,12 @@ class CRTStrategyEngine:
         elif direction == "SELL":
             low_indices = np.where(swing_lows_ltf)[0]
             for s_idx in reversed(low_indices[-3:]):
-                target_level = float(df_ltf.iloc[s_idx]["low"])
-                post_swing = df_ltf.iloc[s_idx + 1:]
+                target_level = float(df_ltf_closed.iloc[s_idx]["low"])
+                post_swing = df_ltf_closed.iloc[s_idx + 1:]
                 if (
                     len(post_swing) > 0
                     and float(post_swing["close"].min()) < target_level
-                    and float(df_ltf.iloc[-1]["close"]) < ref_range.high
+                    and float(df_ltf_closed.iloc[-1]["close"]) < ref_range.high
                 ):
                     mss_status = "CONFIRMED"
                     mss_level = target_level
@@ -427,7 +473,7 @@ class CRTStrategyEngine:
         if mss_status != "CONFIRMED":
             rejections.append("تغییر ساختار بازار (MSS) در تایم‌فریم پایین هنوز تایید نشده است.")
 
-        fvgs = self.detect_fvgs(df_mtf, timeframe_label=mtf_label)
+        fvgs = self.detect_fvgs(df_mtf_closed, timeframe_label=mtf_label)
         active_fvg_dicts = []
         retest_zone = None
 

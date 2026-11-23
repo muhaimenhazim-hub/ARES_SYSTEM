@@ -2,14 +2,14 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 02: SMC / ICT STRATEGY ENGINE (Smart Money Concepts & ICT)
-VERSION: 14.0 (PYTHON 3.12+ TIMEZONE COMPLIANT & PANDAS 2.X COMPATIBLE)
+VERSION: 14.1 (CLOSED-CANDLES ANALYSIS & D1/H4 DAILY BIAS EVALUATION)
 ================================================================================
 """
 
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
@@ -63,6 +63,8 @@ class SMCAnalysisResult:
     liquidity_pools: List[Dict] = field(default_factory=list)
     premium_discount_status: Dict = field(default_factory=dict)
     displacement_strength: float = 0.0
+    daily_bias: str = "NEUTRAL"  # 'BULLISH', 'BEARISH', 'NEUTRAL'
+    daily_bias_details: Dict[str, Any] = field(default_factory=dict)
     status: str = "NEUTRAL"
     confirmation_evidence: List[str] = field(default_factory=list)
     rejection_evidence: List[str] = field(default_factory=list)
@@ -85,6 +87,8 @@ class SMCAnalysisResult:
             "liquidity": self.liquidity_pools,
             "pricing": self.premium_discount_status,
             "displacement_strength": round(self.displacement_strength, 2),
+            "daily_bias": self.daily_bias,
+            "daily_bias_details": self.daily_bias_details,
             "status": self.status,
             "confirmation_evidence": self.confirmation_evidence,
             "rejection_evidence": self.rejection_evidence,
@@ -230,7 +234,7 @@ class SMCICTStrategyEngine:
         last_mss = None
         trend = "RANGING"
 
-        if len(swings) < 3:
+        if len(swings) < 3 or len(df) == 0:
             return last_bos, last_choch, last_mss, trend
 
         highs = [s for s in swings if s.point_type == "HIGH"]
@@ -242,7 +246,7 @@ class SMCICTStrategyEngine:
             elif highs[-1].price < highs[-2].price and lows[-1].price < lows[-2].price:
                 trend = "BEARISH"
 
-        last_closed = df.iloc[-2]
+        last_closed = df.iloc[-1]
         current_close = float(last_closed["close"])
 
         if trend == "BULLISH" and highs:
@@ -392,18 +396,126 @@ class SMCICTStrategyEngine:
             "current_price": current_price,
         }
 
+    def evaluate_daily_bias(
+        self,
+        df_h4: Optional[pd.DataFrame] = None,
+        df_d1: Optional[pd.DataFrame] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """محاسبه بایاس روزانه (D1/H4) و تشخیص چرخش شدید بایاس جهت امتیازدهی و محافظت از معاملات باز"""
+        d1_bias = "NEUTRAL"
+        h4_bias = "NEUTRAL"
+        h4_choch_dir = "NONE"
+        h4_disp_dir = "NONE"
+        strong_reversal_to = "NONE"
+
+        if df_d1 is not None and len(df_d1) >= 4:
+            d1_closed = df_d1.iloc[:-1].reset_index(drop=True)
+            c_last = d1_closed.iloc[-1]
+            c_prev = d1_closed.iloc[-2]
+            last_open = float(c_last["open"])
+            last_close = float(c_last["close"])
+            prev_high = float(c_prev["high"])
+            prev_low = float(c_prev["low"])
+            prev_close = float(c_prev["close"])
+
+            d1_trend = "RANGING"
+            if len(d1_closed) >= 7:
+                d1_swings = self.identify_swings(d1_closed)
+                _, _, _, d1_trend = self.detect_structure_events(d1_closed, d1_swings)
+
+            d1_bull = (last_close > prev_high) or (
+                last_close > last_open and last_close > prev_close and d1_trend != "BEARISH"
+            )
+            d1_bear = (last_close < prev_low) or (
+                last_close < last_open and last_close < prev_close and d1_trend != "BULLISH"
+            )
+
+            if d1_bull and not d1_bear:
+                d1_bias = "BULLISH"
+            elif d1_bear and not d1_bull:
+                d1_bias = "BEARISH"
+            elif d1_trend in ("BULLISH", "BEARISH"):
+                d1_bias = d1_trend
+
+        if df_h4 is not None and len(df_h4) >= 8:
+            h4_closed = df_h4.iloc[:-1].reset_index(drop=True)
+            h4_atr_s = self.calculate_atr(h4_closed)
+            h4_atr = float(h4_atr_s.iloc[-1]) if len(h4_atr_s) > 0 and not pd.isna(h4_atr_s.iloc[-1]) else 0.0
+            h4_swings = self.identify_swings(h4_closed)
+            _, h4_choch, _, h4_trend = self.detect_structure_events(h4_closed, h4_swings)
+
+            c_h4 = h4_closed.iloc[-1]
+            c_h4_prev = h4_closed.iloc[-2]
+            h4_open = float(c_h4["open"])
+            h4_close = float(c_h4["close"])
+            h4_range = float(c_h4["high"]) - float(c_h4["low"])
+            h4_body = abs(h4_close - h4_open)
+
+            if (
+                h4_atr > 0
+                and h4_range > 0
+                and (h4_range / h4_atr) >= self.displacement_atr_mult
+                and (h4_body / h4_range) >= self.displacement_body_ratio
+            ):
+                if h4_close > h4_open:
+                    h4_disp_dir = "BULLISH"
+                elif h4_close < h4_open:
+                    h4_disp_dir = "BEARISH"
+
+            if h4_choch:
+                choch_type = str(h4_choch.get("type", "")).upper()
+                if "BULLISH" in choch_type:
+                    h4_choch_dir = "BULLISH"
+                elif "BEARISH" in choch_type:
+                    h4_choch_dir = "BEARISH"
+
+            if h4_choch_dir in ("BULLISH", "BEARISH"):
+                h4_bias = h4_choch_dir
+            elif h4_trend in ("BULLISH", "BEARISH"):
+                h4_bias = h4_trend
+            elif h4_close > float(c_h4_prev["high"]):
+                h4_bias = "BULLISH"
+            elif h4_close < float(c_h4_prev["low"]):
+                h4_bias = "BEARISH"
+
+        daily_bias = "NEUTRAL"
+        if d1_bias == "BULLISH" and h4_bias != "BEARISH":
+            daily_bias = "BULLISH"
+        elif d1_bias == "BEARISH" and h4_bias != "BULLISH":
+            daily_bias = "BEARISH"
+        elif d1_bias == "NEUTRAL" and h4_bias in ("BULLISH", "BEARISH"):
+            daily_bias = h4_bias
+
+        if h4_choch_dir in ("BULLISH", "BEARISH") and h4_disp_dir == h4_choch_dir:
+            strong_reversal_to = h4_choch_dir
+        elif d1_bias in ("BULLISH", "BEARISH") and h4_bias == d1_bias and h4_disp_dir == d1_bias:
+            strong_reversal_to = d1_bias
+
+        details = {
+            "d1_bias": d1_bias,
+            "h4_bias": h4_bias,
+            "h4_choch_dir": h4_choch_dir,
+            "h4_disp_dir": h4_disp_dir,
+            "strong_reversal_to": strong_reversal_to,
+        }
+        return daily_bias, details
+
     def analyze_market(
         self,
         symbol: str,
         market: str,
         df_mtf: pd.DataFrame,
         timeframe_label: str = "M15",
+        df_h4: Optional[pd.DataFrame] = None,
+        df_d1: Optional[pd.DataFrame] = None,
     ) -> SMCAnalysisResult:
         analysis_id = f"SMC_{symbol}_{uuid.uuid4().hex[:8]}"
         confirmations: List[str] = []
         rejections: List[str] = []
 
-        if df_mtf is None or len(df_mtf) < 10:
+        daily_bias, daily_bias_details = self.evaluate_daily_bias(df_h4=df_h4, df_d1=df_d1)
+
+        if df_mtf is None or len(df_mtf) < 11:
             return SMCAnalysisResult(
                 analysis_id=analysis_id,
                 symbol=symbol,
@@ -411,16 +523,23 @@ class SMCICTStrategyEngine:
                 trend_direction="RANGING",
                 timeframes_used={"MTF": timeframe_label},
                 current_market_regime="EQUILIBRIUM",
+                daily_bias=daily_bias,
+                daily_bias_details=daily_bias_details,
                 status="NEUTRAL",
                 rejection_evidence=["داده‌های کندلی جهت تحلیل ساختار SMC کافی نیست."],
             )
 
-        atr_series = self.calculate_atr(df_mtf)
+        # تحلیل منحصراً روی کندل‌های بسته‌شده (حذف کندل در حال تشکیل iloc[-1])
+        df_closed = df_mtf.iloc[:-1].reset_index(drop=True)
+
+        atr_series = self.calculate_atr(df_closed)
         current_atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 1.0
 
-        swings = self.identify_swings(df_mtf)
-        last_bos, last_choch, last_mss, trend = self.detect_structure_events(df_mtf, swings)
+        swings = self.identify_swings(df_closed)
+        last_bos, last_choch, last_mss, trend = self.detect_structure_events(df_closed, swings)
         confirmations.append(f"جهت ساختار کلی بازار: {trend}")
+        if daily_bias != "NEUTRAL":
+            confirmations.append(f"بایاس روزانه (D1/H4): {daily_bias}")
 
         if last_bos:
             confirmations.append(f"رویداد شکست ساختار (BOS) در سطح {last_bos['broken_level']} ثبت شد.")
@@ -433,16 +552,16 @@ class SMCICTStrategyEngine:
             for p in pools
         ]
 
-        obs = self.detect_order_blocks(df_mtf, swings, atr_series)
+        obs = self.detect_order_blocks(df_closed, swings, atr_series)
         ob_dicts = [
             {"id": ob.ob_id, "direction": ob.direction, "top": ob.top, "bottom": ob.bottom}
             for ob in obs
         ]
 
-        pricing = self.calculate_premium_discount(df_mtf, swings)
+        pricing = self.calculate_premium_discount(df_closed, swings)
         current_zone = pricing.get("current_zone", "EQUILIBRIUM")
 
-        last_candle = df_mtf.iloc[-2]
+        last_candle = df_closed.iloc[-1]
         c_range = float(last_candle["high"] - last_candle["low"])
         disp_strength = float(c_range / current_atr) if current_atr > 0 else 0.0
 
@@ -471,6 +590,8 @@ class SMCICTStrategyEngine:
             liquidity_pools=pool_dicts,
             premium_discount_status=pricing,
             displacement_strength=disp_strength,
+            daily_bias=daily_bias,
+            daily_bias_details=daily_bias_details,
             status=status,
             confirmation_evidence=confirmations,
             rejection_evidence=rejections,

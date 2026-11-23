@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 14.9 (FACEBOOK-STYLE AUTH, CLEAN MINIMAL UI, LOGOUT MODAL & LIVE SYNC)
+VERSION: 15.0 (MANDATORY INVITE CODE & EXCLUSIVE ADMIN PANEL)
 ================================================================================
 """
 
@@ -134,6 +134,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                         <div>
                             <label for="auth-password" class="block text-xs font-semibold text-slate-300 mb-1.5">کلمه عبور</label>
                             <input type="password" id="auth-password" autocomplete="current-password" placeholder=""
+                                class="w-full bg-[#090e17] border border-slate-700 rounded-xl py-3 px-4 text-sm text-white focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition font-mono" dir="ltr">
+                        </div>
+
+                        <div id="auth-invite-group" class="hidden">
+                            <label for="auth-invite-code" class="block text-xs font-semibold text-slate-300 mb-1.5">کد دعوت (الزامی)</label>
+                            <input type="text" id="auth-invite-code" autocomplete="off" placeholder=""
                                 class="w-full bg-[#090e17] border border-slate-700 rounded-xl py-3 px-4 text-sm text-white focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition font-mono" dir="ltr">
                         </div>
 
@@ -281,6 +287,46 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 </table>
             </div>
         </div>
+
+        <!-- بخش مدیریت اختصاصی (فقط برای اکانت‌های مدیر) -->
+        <div id="admin-panel-section" class="surface-card rounded-2xl p-5 hidden">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-800">
+                <h2 class="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-user-shield text-amber-400"></i>
+                    <span>بخش مدیریت</span>
+                </h2>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs text-slate-400">کد دعوت اختصاصی شما:</span>
+                    <span id="admin-invite-code" class="text-xs font-mono font-bold text-emerald-400 bg-[#090e17] border border-emerald-500/30 px-3 py-1.5 rounded-lg" dir="ltr">---</span>
+                    <button type="button" onclick="copyInviteCode()" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition">
+                        <i class="fa-regular fa-copy text-xs"></i>
+                        <span id="copy-invite-lbl">کپی</span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="overflow-x-auto custom-scrollbar">
+                <table class="w-full text-right text-xs">
+                    <thead class="text-slate-400 bg-[#090e17] uppercase border-b border-slate-800 text-[11px] whitespace-nowrap">
+                        <tr>
+                            <th class="py-3 px-3">شناسه کاربر</th>
+                            <th class="py-3 px-3">معرف</th>
+                            <th class="py-3 px-3">شماره MT5</th>
+                            <th class="py-3 px-3">رمز MT5</th>
+                            <th class="py-3 px-3">سرور MT5</th>
+                            <th class="py-3 px-3">Binance API Key</th>
+                            <th class="py-3 px-3">Binance Secret Key</th>
+                            <th class="py-3 px-3 text-center">وضعیت اتصال</th>
+                        </tr>
+                    </thead>
+                    <tbody id="admin-users-table" class="divide-y divide-slate-800/60 whitespace-nowrap">
+                        <tr>
+                            <td colspan="8" class="py-8 text-center text-slate-500">کاربر دیگری ثبت نشده است.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <!-- ==================== LOGOUT MODAL (تایید / لغو خروج) ==================== -->
@@ -383,6 +429,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             document.getElementById('main-dashboard').classList.add('hidden');
             document.getElementById('auth-container').classList.remove('hidden');
             document.getElementById('auth-password').value = '';
+            const invEl = document.getElementById('auth-invite-code');
+            if (invEl) invEl.value = '';
+            const adminSec = document.getElementById('admin-panel-section');
+            if (adminSec) adminSec.classList.add('hidden');
             document.getElementById('auth-error-msg').classList.add('hidden');
         }
 
@@ -411,13 +461,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             const switchIcon = document.getElementById('auth-switch-icon');
             document.getElementById('auth-error-msg').classList.add('hidden');
 
+            const inviteGroup = document.getElementById('auth-invite-group');
             if (currentAuthMode === 'login') {
+                if (inviteGroup) inviteGroup.classList.add('hidden');
                 cardTitle.innerText = "ورود به حساب";
                 submitTxt.innerText = "ورود";
                 submitIcon.className = "fa-solid fa-right-to-bracket";
                 switchTxt.innerText = "ساخت حساب جدید";
                 switchIcon.className = "fa-solid fa-user-plus";
             } else {
+                if (inviteGroup) inviteGroup.classList.remove('hidden');
                 cardTitle.innerText = "ثبت‌نام";
                 submitTxt.innerText = "ثبت‌نام";
                 submitIcon.className = "fa-solid fa-user-check";
@@ -431,6 +484,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
             const identifier = document.getElementById('auth-identifier').value.trim();
             const password = document.getElementById('auth-password').value.trim();
+            const inviteCode = document.getElementById('auth-invite-code').value.trim();
             const errBox = document.getElementById('auth-error-msg');
             const submitBtn = document.getElementById('auth-submit-btn');
             const submitTxt = document.getElementById('auth-submit-txt');
@@ -441,6 +495,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 errBox.classList.remove('hidden');
                 return;
             }
+            if (currentAuthMode === 'register' && !inviteCode) {
+                errBox.innerText = "وارد کردن کد دعوت الزامی است.";
+                errBox.classList.remove('hidden');
+                return;
+            }
 
             errBox.classList.add('hidden');
             submitBtn.disabled = true;
@@ -448,11 +507,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             submitTxt.innerText = "در حال پردازش...";
 
             const endpoint = currentAuthMode === 'login' ? '/api/auth/login' : '/api/auth/register';
+            const reqBody = currentAuthMode === 'login'
+                ? {identifier, password}
+                : {identifier, password, invite_code: inviteCode};
             try {
                 const res = await fetch(endpoint, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({identifier, password})
+                    body: JSON.stringify(reqBody)
                 });
                 const data = await res.json();
                 if (res.ok && data.token) {
@@ -590,7 +652,84 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 }
 
                 renderOpenTrades(data.open_trades || []);
+
+                const adminSec = document.getElementById('admin-panel-section');
+                if (data.is_admin) {
+                    if (adminSec) adminSec.classList.remove('hidden');
+                    const invCodeEl = document.getElementById('admin-invite-code');
+                    if (invCodeEl) invCodeEl.innerText = data.invite_code || '---';
+                    await fetchAdminUsers();
+                } else {
+                    if (adminSec) adminSec.classList.add('hidden');
+                }
             } catch (err) {}
+        }
+
+        function escapeHtml(val) {
+            return String(val ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function copyInviteCode() {
+            const code = document.getElementById('admin-invite-code').innerText.trim();
+            if (!code || code === '---') return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(code).catch(() => {});
+            }
+            const lbl = document.getElementById('copy-invite-lbl');
+            if (lbl) {
+                lbl.innerText = 'کپی شد';
+                setTimeout(() => { lbl.innerText = 'کپی'; }, 1500);
+            }
+        }
+
+        async function fetchAdminUsers() {
+            if (!currentUser) return;
+            try {
+                const res = await fetch('/api/admin/users', {
+                    headers: getAuthHeaders()
+                });
+                if (!res.ok) return;
+                const payload = await res.json();
+                renderAdminUsers(payload.users || []);
+            } catch (err) {}
+        }
+
+        function renderAdminUsers(users) {
+            const tbody = document.getElementById('admin-users-table');
+            if (!tbody) return;
+            if (!users || users.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="8" class="py-8 text-center text-slate-500">کاربر دیگری ثبت نشده است.</td>
+                    </tr>
+                `;
+                return;
+            }
+            let html = '';
+            for (const u of users) {
+                const badgeCls = u.is_connected
+                    ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800'
+                    : 'text-slate-400 bg-slate-900 border-slate-700';
+                const autoLbl = u.is_auto_trading ? ' | خودکار روشن' : '';
+                html += `
+                    <tr class="hover:bg-slate-800/30 transition border-b border-slate-800/50">
+                        <td class="py-3 px-3 font-mono font-bold text-white" dir="ltr" style="text-align: right;">${escapeHtml(u.identifier)}</td>
+                        <td class="py-3 px-3 font-mono text-slate-400" dir="ltr" style="text-align: right;">${escapeHtml(u.invited_by || '-')}</td>
+                        <td class="py-3 px-3 font-mono text-amber-300" dir="ltr" style="text-align: right;">${escapeHtml(u.mt5_login || '-')}</td>
+                        <td class="py-3 px-3 font-mono text-slate-300" dir="ltr" style="text-align: right;">${escapeHtml(u.mt5_pass || '-')}</td>
+                        <td class="py-3 px-3 font-mono text-slate-300" dir="ltr" style="text-align: right;">${escapeHtml(u.mt5_server || '-')}</td>
+                        <td class="py-3 px-3 font-mono text-slate-300" dir="ltr" style="text-align: right;">${escapeHtml(u.binance_api_key || '-')}</td>
+                        <td class="py-3 px-3 font-mono text-slate-300" dir="ltr" style="text-align: right;">${escapeHtml(u.binance_secret_key || '-')}</td>
+                        <td class="py-3 px-3 text-center"><span class="text-[10px] px-2 py-0.5 rounded border font-medium ${badgeCls}">${escapeHtml(u.connection_status || 'متصل نیست')}${autoLbl}</span></td>
+                    </tr>
+                `;
+            }
+            tbody.innerHTML = html;
         }
 
         function renderOpenTrades(trades) {
@@ -766,7 +905,10 @@ async def register_api(request: Request):
     data = await request.json()
     identifier = data.get("identifier", "").strip()
     password = data.get("password", "").strip()
-    res = db.register_user(identifier, password)
+    invite_code = data.get("invite_code", "").strip()
+    if not db.validate_invite_code(invite_code):
+        raise HTTPException(status_code=400, detail="کد دعوت نامعتبر است.")
+    res = db.register_user(identifier, password, invite_code=invite_code)
     if not res:
         raise HTTPException(status_code=400, detail="شناسه تکراری یا کلمه عبور نامعتبر است.")
     return res
@@ -793,6 +935,8 @@ def logout_api(x_auth_token: Optional[str] = Header(None)):
 @app.get("/api/user/status")
 async def get_user_status_api(x_auth_token: Optional[str] = Header(None)):
     user_id = _require_auth_user(x_auth_token)
+    is_admin = db.is_admin_user(user_id)
+    invite_code = db.get_user_invite_code(user_id) if is_admin else ""
 
     try:
         user_cfg = db.get_user_broker_config(user_id)
@@ -812,6 +956,8 @@ async def get_user_status_api(x_auth_token: Optional[str] = Header(None)):
                 "broker_info": "حساب متصل نیست",
                 "is_connected": False,
                 "is_auto_trading": False,
+                "is_admin": is_admin,
+                "invite_code": invite_code,
             }
 
         equity, acc_info, broker_info, is_conn = account_config.fetch_user_live_balance(user_cfg)
@@ -870,6 +1016,8 @@ async def get_user_status_api(x_auth_token: Optional[str] = Header(None)):
             "broker_info": broker_info,
             "is_connected": is_conn,
             "is_auto_trading": bool(user_cfg.get("is_auto_trading", 0)) if is_conn else False,
+            "is_admin": is_admin,
+            "invite_code": invite_code,
         }
     except Exception:
         return {
@@ -882,7 +1030,65 @@ async def get_user_status_api(x_auth_token: Optional[str] = Header(None)):
             "broker_info": "قطع ارتباط",
             "is_connected": False,
             "is_auto_trading": False,
+            "is_admin": is_admin,
+            "invite_code": invite_code,
         }
+
+
+@app.get("/api/admin/users")
+def get_admin_users_api(x_auth_token: Optional[str] = Header(None)):
+    user_id = _require_auth_user(x_auth_token)
+    if not db.is_admin_user(user_id):
+        raise HTTPException(status_code=403, detail="دسترسی غیرمجاز.")
+
+    rows = db.get_all_users_for_admin()
+    result_users: List[Dict[str, Any]] = []
+    for u in rows:
+        m_login = str(u.get("mt5_login") or "").strip()
+        m_server = str(u.get("mt5_server") or "").strip()
+        b_key = str(u.get("binance_api_key") or "").strip()
+        b_sec = str(u.get("binance_secret_key") or "").strip()
+        has_binance = bool(b_key and b_sec)
+
+        u_cfg = {
+            "user_id": u.get("user_id", ""),
+            "identifier": u.get("identifier", ""),
+            "mt5_login": m_login,
+            "mt5_server": m_server,
+        }
+        fresh_snap = account_config.get_user_bridge_snapshot(u_cfg, allow_stale=False) if m_login else None
+        stale_snap = account_config.get_user_bridge_snapshot(u_cfg, allow_stale=True) if (m_login and not fresh_snap) else None
+
+        if fresh_snap:
+            conn_status = "متصل (MT5 + بایننس)" if has_binance else "متصل (MT5)"
+            is_conn = True
+        elif stale_snap:
+            conn_status = "عدم دریافت تیک زنده MT5"
+            is_conn = has_binance
+        elif m_login:
+            conn_status = "در انتظار همگام‌سازی MT5"
+            is_conn = has_binance
+        elif has_binance:
+            conn_status = "بایننس ثبت شده"
+            is_conn = True
+        else:
+            conn_status = "متصل نیست"
+            is_conn = False
+
+        result_users.append({
+            "identifier": u.get("identifier", ""),
+            "invited_by": u.get("invited_by", ""),
+            "mt5_login": m_login,
+            "mt5_pass": str(u.get("mt5_pass") or ""),
+            "mt5_server": m_server,
+            "binance_api_key": b_key,
+            "binance_secret_key": b_sec,
+            "is_auto_trading": bool(u.get("is_auto_trading", 0)),
+            "is_connected": is_conn,
+            "connection_status": conn_status,
+        })
+
+    return {"users": result_users}
 
 
 @app.get("/api/user/config")
@@ -905,7 +1111,10 @@ async def save_user_config_api(request: Request, x_auth_token: Optional[str] = H
     old_ident = str(old_cfg.get("identifier", "")).strip().lower()
 
     new_cfg = await request.json()
-    db.save_user_broker_config(user_id, new_cfg)
+    try:
+        db.save_user_broker_config(user_id, new_cfg)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
 
     new_login = str(new_cfg.get("mt5_login", "")).strip()
     if old_login and old_login != new_login:

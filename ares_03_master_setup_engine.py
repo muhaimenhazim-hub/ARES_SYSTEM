@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 03: MASTER SETUP ENGINE
-VERSION: 14.3 (STRICT VALIDATION GATE: MSS+DISPLACEMENT & MANDATORY FVG/OB RETEST)
+VERSION: 14.4 (FVG-ONLY CRT+MSS+FVG, DAILY BIAS SCORING & 1.1R/1.5R/2.0R TARGETS)
 ================================================================================
 """
 
@@ -31,6 +31,7 @@ class SetupOpportunity:
     suggested_risk_pct: float
     is_counter_trend: bool
     status: str  # 'APPROVED', 'REJECTED'
+    daily_bias: str = "NEUTRAL"
     rejection_reason: Optional[str] = None
     confirmations: List[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -42,6 +43,7 @@ class SetupOpportunity:
             "market": self.market,
             "direction": self.direction,
             "setup_name": self.setup_name,
+            "daily_bias": self.daily_bias,
             "pricing": {
                 "entry_price": round(self.entry_price, 5),
                 "stop_loss": round(self.stop_loss, 5),
@@ -64,16 +66,10 @@ class SetupOpportunity:
 
 
 class MasterSetupEngine:
-    """موتور مرکزی ارزیابی، تطبیق و امتیازدهی ۷ ستاپ اصلی ARES"""
+    """موتور مرکزی ارزیابی، تطبیق و امتیازدهی ستاپ تاییدشده ARES"""
 
     SETUP_NAMES = [
-        "CRT Liquidity Sweep",
         "CRT + MSS + FVG",
-        "Order Block Reversal",
-        "FVG Trend Continuation",
-        "Liquidity Sweep Reversal",
-        "BOS + Retest",
-        "Breakout + Retest",
     ]
 
     def __init__(self, min_rr_ratio: float = 1.5):
@@ -176,10 +172,24 @@ class MasterSetupEngine:
             breakdown["fvg_ob_retest"] += 7.5
 
         crt_dir = crt_data.get("direction", "NONE")
-        if (crt_dir == "BUY" and trend == "BULLISH") or (crt_dir == "SELL" and trend == "BEARISH"):
-            breakdown["mtf_alignment"] = 10.0
-        elif crt_dir != "NONE":
-            breakdown["mtf_alignment"] = 5.0
+        daily_bias = str(smc_data.get("daily_bias", "NEUTRAL")).upper()
+        aligned_mtf = (crt_dir == "BUY" and trend == "BULLISH") or (crt_dir == "SELL" and trend == "BEARISH")
+        aligned_bias = (crt_dir == "BUY" and daily_bias == "BULLISH") or (crt_dir == "SELL" and daily_bias == "BEARISH")
+        counter_bias = (crt_dir == "BUY" and daily_bias == "BEARISH") or (crt_dir == "SELL" and daily_bias == "BULLISH")
+
+        if crt_dir != "NONE":
+            if aligned_mtf and aligned_bias:
+                breakdown["mtf_alignment"] = 10.0
+            elif aligned_mtf and daily_bias == "NEUTRAL":
+                breakdown["mtf_alignment"] = 10.0
+            elif aligned_bias:
+                breakdown["mtf_alignment"] = 8.0
+            elif not counter_bias:
+                breakdown["mtf_alignment"] = 5.0
+            elif aligned_mtf and counter_bias:
+                breakdown["mtf_alignment"] = 2.0
+            else:
+                breakdown["mtf_alignment"] = 0.0
 
         has_retest = (
             retest_confirmed
@@ -198,24 +208,11 @@ class MasterSetupEngine:
     def identify_primary_setup(self, crt_data: Dict, smc_data: Dict) -> str:
         has_crt_sweep = crt_data.get("sweep", {}).get("status") == "VALID_SWEEP"
         has_mss = crt_data.get("market_structure", {}).get("mss_status") == "CONFIRMED"
-        has_fvg = len(crt_data.get("fvgs", [])) > 0
-        has_ob = len(smc_data.get("order_blocks", [])) > 0
-        has_bos = smc_data.get("structure_events", {}).get("last_bos") is not None
+        has_fvg = len(crt_data.get("fvgs", []) or []) > 0
 
         if has_crt_sweep and has_mss and has_fvg:
             return "CRT + MSS + FVG"
-        elif has_crt_sweep:
-            return "CRT Liquidity Sweep"
-        elif has_ob and has_mss:
-            return "Order Block Reversal"
-        elif has_bos and has_fvg:
-            return "FVG Trend Continuation"
-        elif has_crt_sweep and not has_fvg:
-            return "Liquidity Sweep Reversal"
-        elif has_bos:
-            return "BOS + Retest"
-        else:
-            return "Breakout + Retest"
+        return "NONE"
 
     def evaluate_opportunity(
         self,
@@ -224,10 +221,12 @@ class MasterSetupEngine:
         current_market_price: float,
         session_valid: bool = True,
         in_news_window: bool = False,
+        atr: float = 0.0,
     ) -> SetupOpportunity:
         symbol = crt_result_dict.get("symbol", "UNKNOWN")
         market = crt_result_dict.get("market", "UNKNOWN")
         direction = crt_result_dict.get("direction", "NONE")
+        daily_bias = str(smc_result_dict.get("daily_bias", "NEUTRAL")).upper()
         opp_id = f"OPP_{symbol}_{uuid.uuid4().hex[:8]}"
 
         confirmations: List[str] = []
@@ -250,6 +249,7 @@ class MasterSetupEngine:
                 suggested_risk_pct=0.0,
                 is_counter_trend=False,
                 status="REJECTED",
+                daily_bias=daily_bias,
                 rejection_reason="ورود به معامله در بازه ۳۰ دقیقه قبل و بعد از خبر مهم ممنوع است.",
             )
 
@@ -292,10 +292,42 @@ class MasterSetupEngine:
                 suggested_risk_pct=0.0,
                 is_counter_trend=False,
                 status="REJECTED",
+                daily_bias=daily_bias,
                 rejection_reason="ستاپ هنوز تاییدیه کامل (Sweep + بازگشت به رنج + MSS + Displacement) را دریافت نکرده است.",
             )
 
-        # گیت ۲: اجباری بودن پولبک (Retest) قیمت به ناحیه فعال FVG یا Order Block
+        # گیت ۲: اجباری بودن وجود FVG فعال (حذف کامل معاملات ضعیف بدون FVG)
+        active_fvgs = crt_result_dict.get("fvgs", []) or []
+        if len(active_fvgs) == 0 or setup_name != "CRT + MSS + FVG":
+            total_score, breakdown = self.calculate_score(
+                crt_result_dict,
+                smc_result_dict,
+                session_valid,
+                in_news_window,
+                retest_confirmed=False,
+            )
+            return SetupOpportunity(
+                opportunity_id=opp_id,
+                symbol=symbol,
+                market=market,
+                direction=direction,
+                setup_name="NONE",
+                entry_price=current_market_price,
+                stop_loss=0.0,
+                take_profit_1=0.0,
+                take_profit_2=0.0,
+                take_profit_3=0.0,
+                risk_reward_ratio=0.0,
+                total_score=total_score,
+                score_breakdown=breakdown,
+                suggested_risk_pct=0.0,
+                is_counter_trend=False,
+                status="REJECTED",
+                daily_bias=daily_bias,
+                rejection_reason="ستاپ فاقد FVG فعال است؛ طبق نتایج بک‌تست، ورود بدون FVG مجاز نیست.",
+            )
+
+        # گیت ۳: اجباری بودن پولبک (Retest) قیمت به ناحیه فعال FVG یا Order Block
         retest_ok, matched_zone = self._has_retest_confirmation(
             direction=direction,
             current_market_price=current_market_price,
@@ -327,6 +359,7 @@ class MasterSetupEngine:
                 suggested_risk_pct=0.0,
                 is_counter_trend=False,
                 status="REJECTED",
+                daily_bias=daily_bias,
                 rejection_reason="تاییدیه اولیه کامل است؛ اما ربات منتظر پولبک (Retest) قیمت به ناحیه FVG یا Order Block است.",
             )
 
@@ -339,6 +372,10 @@ class MasterSetupEngine:
         is_counter_trend = (
             (direction == "BUY" and trend == "BEARISH")
             or (direction == "SELL" and trend == "BULLISH")
+        )
+        is_counter_daily_bias = (
+            (direction == "BUY" and daily_bias == "BEARISH")
+            or (direction == "SELL" and daily_bias == "BULLISH")
         )
 
         if is_counter_trend:
@@ -360,9 +397,32 @@ class MasterSetupEngine:
                     suggested_risk_pct=0.0,
                     is_counter_trend=True,
                     status="REJECTED",
+                    daily_bias=daily_bias,
                     rejection_reason=f"معامله خلاف جهت روند است و امتیاز ({total_score:.1f}) کمتر از حد نصاب ۸۵ می‌باشد.",
                 )
             confirmations.append("معامله خلاف روند با نمره بالای ۸۵ و تایید کامل ساختار مجاز شناخته شد.")
+
+        if is_counter_daily_bias and total_score < 75.0:
+            return SetupOpportunity(
+                opportunity_id=opp_id,
+                symbol=symbol,
+                market=market,
+                direction=direction,
+                setup_name=setup_name,
+                entry_price=current_market_price,
+                stop_loss=0.0,
+                take_profit_1=0.0,
+                take_profit_2=0.0,
+                take_profit_3=0.0,
+                risk_reward_ratio=0.0,
+                total_score=total_score,
+                score_breakdown=breakdown,
+                suggested_risk_pct=0.0,
+                is_counter_trend=is_counter_trend,
+                status="REJECTED",
+                daily_bias=daily_bias,
+                rejection_reason=f"معامله خلاف بایاس روزانه ({daily_bias}) و با امتیاز کمتر از حد نصاب ۷۵ ({total_score:.1f}) است.",
+            )
 
         if total_score < 60.0:
             return SetupOpportunity(
@@ -382,6 +442,7 @@ class MasterSetupEngine:
                 suggested_risk_pct=0.0,
                 is_counter_trend=is_counter_trend,
                 status="REJECTED",
+                daily_bias=daily_bias,
                 rejection_reason=f"امتیاز ستاپ ({total_score:.1f}) کمتر از حد نصاب الزامی ۶۰ است.",
             )
 
@@ -392,34 +453,38 @@ class MasterSetupEngine:
         else:
             suggested_risk = 1.5
 
-        # همیشه قیمت ورود برابر با قیمت لحظه‌ای بازار است تا سفارش Market در متاتریدر بدون خطای استاپ اجرا شود
+        if is_counter_daily_bias and total_score < 85.0:
+            suggested_risk = min(suggested_risk, 0.5)
+            confirmations.append(f"شرایط ضدبایاس روزانه ({daily_bias}) اعمال شد: ریسک به {suggested_risk}% محدود گردید.")
+
+        # محاسبه قیمت ورود و SL بر پایه ساختار سویپ + ATR
         entry_price = float(current_market_price)
-        ref_range = crt_result_dict.get("reference_range", {})
         inv_price = crt_result_dict.get("invalidation_price")
+        eff_atr = float(atr or 0.0)
+        min_sl_dist = max(0.5 * eff_atr, entry_price * 0.0005) if eff_atr > 0 else (entry_price * 0.0012)
+        fallback_sl_dist = max(1.5 * eff_atr, entry_price * 0.0020) if eff_atr > 0 else (entry_price * 0.0020)
 
         if direction == "BUY":
-            stop_loss = float(inv_price) if (inv_price and float(inv_price) < entry_price) else (entry_price * 0.996)
+            stop_loss = float(inv_price) if (inv_price and float(inv_price) < entry_price) else (entry_price - fallback_sl_dist)
             risk_dist = entry_price - stop_loss
-            if risk_dist <= (entry_price * 0.0012):
-                risk_dist = entry_price * 0.0020
+            if risk_dist < min_sl_dist:
+                risk_dist = min_sl_dist
                 stop_loss = entry_price - risk_dist
 
-            tp1 = entry_price + (risk_dist * 1.5)
-            tp2 = entry_price + (risk_dist * 2.5)
-            ref_high = float(ref_range.get("high", 0.0))
-            tp3 = ref_high if ref_high > tp2 else (entry_price + (risk_dist * 4.0))
+            tp1 = entry_price + (risk_dist * 1.1)
+            tp2 = entry_price + (risk_dist * 1.5)
+            tp3 = entry_price + (risk_dist * 2.0)
 
         elif direction == "SELL":
-            stop_loss = float(inv_price) if (inv_price and float(inv_price) > entry_price) else (entry_price * 1.004)
+            stop_loss = float(inv_price) if (inv_price and float(inv_price) > entry_price) else (entry_price + fallback_sl_dist)
             risk_dist = stop_loss - entry_price
-            if risk_dist <= (entry_price * 0.0012):
-                risk_dist = entry_price * 0.0020
+            if risk_dist < min_sl_dist:
+                risk_dist = min_sl_dist
                 stop_loss = entry_price + risk_dist
 
-            tp1 = entry_price - (risk_dist * 1.5)
-            tp2 = entry_price - (risk_dist * 2.5)
-            ref_low = float(ref_range.get("low", 0.0))
-            tp3 = ref_low if (0 < ref_low < tp2) else (entry_price - (risk_dist * 4.0))
+            tp1 = entry_price - (risk_dist * 1.1)
+            tp2 = entry_price - (risk_dist * 1.5)
+            tp3 = entry_price - (risk_dist * 2.0)
         else:
             return SetupOpportunity(
                 opportunity_id=opp_id,
@@ -438,13 +503,13 @@ class MasterSetupEngine:
                 suggested_risk_pct=0.0,
                 is_counter_trend=is_counter_trend,
                 status="REJECTED",
+                daily_bias=daily_bias,
                 rejection_reason="جهت قطعی BUY یا SELL توسط موتورهای پایه صادر نشده است.",
             )
 
         sl_distance = abs(entry_price - stop_loss)
-        rr_ratio = (abs(tp1 - entry_price) / sl_distance) if sl_distance > 0 else 0.0
+        rr_ratio = (abs(tp3 - entry_price) / sl_distance) if sl_distance > 0 else 0.0
 
-        # اعمال تلورانس بسیار جزئی ممیز شناور برای جلوگیری از رد اشتباه نسبت دقیق 1.5
         if (rr_ratio + 1e-6) < self.min_rr_ratio:
             return SetupOpportunity(
                 opportunity_id=opp_id,
@@ -463,10 +528,11 @@ class MasterSetupEngine:
                 suggested_risk_pct=suggested_risk,
                 is_counter_trend=is_counter_trend,
                 status="REJECTED",
+                daily_bias=daily_bias,
                 rejection_reason=f"نسبت سود به زیان ({rr_ratio:.2f}) کمتر از حداقل مجاز ({self.min_rr_ratio}) است.",
             )
 
-        confirmations.append(f"نسبت ریسک به ریوارد {rr_ratio:.2f} معتبر است.")
+        confirmations.append(f"نسبت ریسک به ریوارد نهایی {rr_ratio:.2f} معتبر است (خروج پله‌ای 1.1R / 1.5R / 2.0R).")
         confirmations.append(f"امتیاز ستاپ: {total_score:.1f} / 100 — ریسک پیشنهادی: {suggested_risk}%")
 
         return SetupOpportunity(
@@ -486,5 +552,6 @@ class MasterSetupEngine:
             suggested_risk_pct=suggested_risk,
             is_counter_trend=is_counter_trend,
             status="APPROVED",
+            daily_bias=daily_bias,
             confirmations=confirmations,
         )
