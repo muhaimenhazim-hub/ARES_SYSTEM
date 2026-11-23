@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 15.0 (MANDATORY INVITE CODE & EXCLUSIVE ADMIN PANEL)
+VERSION: 15.1 (FIX HTTP COPY BUTTON & LOGOUT ALWAYS TO LOGIN)
 ================================================================================
 """
 
@@ -413,6 +413,34 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         let currentAuthMode = 'login';
         let statusPollTimer = null;
 
+        function setAuthMode(mode) {
+            currentAuthMode = mode === 'register' ? 'register' : 'login';
+            const cardTitle = document.getElementById('auth-card-title');
+            const submitTxt = document.getElementById('auth-submit-txt');
+            const submitIcon = document.getElementById('auth-submit-icon');
+            const switchTxt = document.getElementById('auth-switch-txt');
+            const switchIcon = document.getElementById('auth-switch-icon');
+            const errBox = document.getElementById('auth-error-msg');
+            if (errBox) errBox.classList.add('hidden');
+
+            const inviteGroup = document.getElementById('auth-invite-group');
+            if (currentAuthMode === 'login') {
+                if (inviteGroup) inviteGroup.classList.add('hidden');
+                if (cardTitle) cardTitle.innerText = "ورود به حساب";
+                if (submitTxt) submitTxt.innerText = "ورود";
+                if (submitIcon) submitIcon.className = "fa-solid fa-right-to-bracket";
+                if (switchTxt) switchTxt.innerText = "ساخت حساب جدید";
+                if (switchIcon) switchIcon.className = "fa-solid fa-user-plus";
+            } else {
+                if (inviteGroup) inviteGroup.classList.remove('hidden');
+                if (cardTitle) cardTitle.innerText = "ثبت‌نام";
+                if (submitTxt) submitTxt.innerText = "ثبت‌نام";
+                if (submitIcon) submitIcon.className = "fa-solid fa-user-check";
+                if (switchTxt) switchTxt.innerText = "بازگشت به صفحه ورود";
+                if (switchIcon) switchIcon.className = "fa-solid fa-arrow-right";
+            }
+        }
+
         function showDashboardView() {
             document.getElementById('auth-container').classList.add('hidden');
             document.getElementById('main-dashboard').classList.remove('hidden');
@@ -433,7 +461,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if (invEl) invEl.value = '';
             const adminSec = document.getElementById('admin-panel-section');
             if (adminSec) adminSec.classList.add('hidden');
-            document.getElementById('auth-error-msg').classList.add('hidden');
+            setAuthMode('login');
         }
 
         if (currentUser && currentUser.user_id && currentUser.token) {
@@ -453,30 +481,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         function toggleAuthMode() {
-            currentAuthMode = currentAuthMode === 'login' ? 'register' : 'login';
-            const cardTitle = document.getElementById('auth-card-title');
-            const submitTxt = document.getElementById('auth-submit-txt');
-            const submitIcon = document.getElementById('auth-submit-icon');
-            const switchTxt = document.getElementById('auth-switch-txt');
-            const switchIcon = document.getElementById('auth-switch-icon');
-            document.getElementById('auth-error-msg').classList.add('hidden');
-
-            const inviteGroup = document.getElementById('auth-invite-group');
-            if (currentAuthMode === 'login') {
-                if (inviteGroup) inviteGroup.classList.add('hidden');
-                cardTitle.innerText = "ورود به حساب";
-                submitTxt.innerText = "ورود";
-                submitIcon.className = "fa-solid fa-right-to-bracket";
-                switchTxt.innerText = "ساخت حساب جدید";
-                switchIcon.className = "fa-solid fa-user-plus";
-            } else {
-                if (inviteGroup) inviteGroup.classList.remove('hidden');
-                cardTitle.innerText = "ثبت‌نام";
-                submitTxt.innerText = "ثبت‌نام";
-                submitIcon.className = "fa-solid fa-user-check";
-                switchTxt.innerText = "بازگشت به صفحه ورود";
-                switchIcon.className = "fa-solid fa-arrow-right";
-            }
+            setAuthMode(currentAuthMode === 'login' ? 'register' : 'login');
         }
 
         async function handleAuthSubmit(event) {
@@ -675,15 +680,40 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         }
 
         function copyInviteCode() {
-            const code = document.getElementById('admin-invite-code').innerText.trim();
+            const codeEl = document.getElementById('admin-invite-code');
+            const code = codeEl ? codeEl.innerText.trim() : '';
             if (!code || code === '---') return;
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(code).catch(() => {});
-            }
-            const lbl = document.getElementById('copy-invite-lbl');
-            if (lbl) {
-                lbl.innerText = 'کپی شد';
-                setTimeout(() => { lbl.innerText = 'کپی'; }, 1500);
+
+            const markCopied = () => {
+                const lbl = document.getElementById('copy-invite-lbl');
+                if (lbl) {
+                    lbl.innerText = 'کپی شد';
+                    setTimeout(() => { lbl.innerText = 'کپی'; }, 1500);
+                }
+            };
+
+            const fallbackCopy = () => {
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = code;
+                    ta.setAttribute('readonly', '');
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.focus();
+                    ta.select();
+                    ta.setSelectionRange(0, code.length);
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    if (ok) markCopied();
+                } catch (e) {}
+            };
+
+            if (navigator.clipboard && window.isSecureContext && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(code).then(markCopied).catch(fallbackCopy);
+            } else {
+                fallbackCopy();
             }
         }
 
