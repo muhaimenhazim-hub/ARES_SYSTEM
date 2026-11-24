@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 04: TRADE & POSITION MANAGEMENT ENGINE
-VERSION: 14.2 (1.0R BREAK-EVEN, 1.1R/1.5R/2.0R 30/30/40 EXITS & 0.01 LOT GUARD)
+VERSION: 14.3 (1.1R 30%+BE, 1.5R 30%+1.05R TRAIL, 2.0R 40% & 0.01 LOT GUARD)
 ================================================================================
 """
 
@@ -307,6 +307,7 @@ class TradePositionManagementEngine:
         pos = self.open_positions[position_id]
         events: List[str] = []
         is_fx_idx = pos.market != "CRYPTO_FUTURES"
+        risk_dist = abs(pos.entry_price - pos.initial_stop_loss)
 
         price_diff = (current_close - pos.entry_price) if pos.side == OrderSide.BUY else (pos.entry_price - current_close)
         pos.floating_pnl = price_diff * pos.current_volume * contract_size
@@ -340,28 +341,7 @@ class TradePositionManagementEngine:
                     "position": pos.to_dict(),
                 }
 
-        # ۲. ریسک‌فری قطعی در ریوارد ۱.۰ (1.0R)
-        risk_dist = abs(pos.entry_price - pos.initial_stop_loss)
-        if risk_dist > 0 and not pos.is_break_even:
-            be_trigger = (pos.entry_price + risk_dist) if pos.side == OrderSide.BUY else (pos.entry_price - risk_dist)
-            be_reached = (pos.side == OrderSide.BUY and current_high >= be_trigger) or (
-                pos.side == OrderSide.SELL and current_low <= be_trigger
-            )
-            if be_reached:
-                fee_buffer = (
-                    pos.entry_price * (self.taker_fee_pct * 2)
-                    if not is_fx_idx
-                    else min(risk_dist * 0.05, pos.entry_price * 0.0005)
-                )
-                pos.stop_loss = (
-                    (pos.entry_price + fee_buffer)
-                    if pos.side == OrderSide.BUY
-                    else (pos.entry_price - fee_buffer)
-                )
-                pos.is_break_even = True
-                events.append("ریوارد ۱.۰ (1.0R) محقق شد — حد ضرر به نقطه سر به سر (Break-Even) منتقل شد.")
-
-        # ۳. پله اول TP1 (1.1R -> بستن ۳۰٪ حجم اولیه با محافظت 0.01)
+        # ۲. پله اول TP1 (1.1R -> بستن ۳۰٪ حجم اولیه + انتقال SL به سر به سر با احتساب هزینه کارمزد/اسپرد)
         if pos.tp1 > 0 and not pos.tp1_hit:
             tp1_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp1) or (
                 pos.side == OrderSide.SELL and current_low <= pos.tp1
@@ -398,7 +378,21 @@ class TradePositionManagementEngine:
                 else:
                     events.append("TP1 (1.1R) لمس شد — به دلیل حداقل حجم 0.01 پوزیشن با Break-Even حفظ شد.")
 
-        # ۴. پله دوم TP2 (1.5R -> بستن ۳۰٪ حجم اولیه + تریلینگ استاپ به TP1)
+                if not pos.is_break_even:
+                    fee_buffer = (
+                        pos.entry_price * (self.taker_fee_pct * 2)
+                        if not is_fx_idx
+                        else min(risk_dist * 0.15, pos.entry_price * 0.0005)
+                    )
+                    pos.stop_loss = (
+                        (pos.entry_price + fee_buffer)
+                        if pos.side == OrderSide.BUY
+                        else (pos.entry_price - fee_buffer)
+                    )
+                    pos.is_break_even = True
+                    events.append("حد ضرر به نقطه ورود (با احتساب هزینه کارمزد/اسپرد) منتقل شد.")
+
+        # ۳. پله دوم TP2 (1.5R -> بستن ۳۰٪ حجم اولیه + تریلینگ استاپ به سطح 1.05R)
         if pos.tp2 > 0 and pos.tp1_hit and not pos.tp2_hit:
             tp2_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp2) or (
                 pos.side == OrderSide.SELL and current_low <= pos.tp2
@@ -431,11 +425,17 @@ class TradePositionManagementEngine:
                             fee_paid=fee,
                         )
                     )
-                if pos.tp1 > 0:
+                if risk_dist > 0:
+                    pos.stop_loss = (
+                        (pos.entry_price + (risk_dist * 1.05))
+                        if pos.side == OrderSide.BUY
+                        else (pos.entry_price - (risk_dist * 1.05))
+                    )
+                elif pos.tp1 > 0:
                     pos.stop_loss = pos.tp1
-                events.append("TP2 (1.5R) محقق شد (۳۰٪ خروج پله‌ای) — تریلینگ استاپ به سطح TP1 ارتقا یافت.")
+                events.append("TP2 (1.5R) محقق شد (۳۰٪ خروج پله‌ای) — تریلینگ استاپ به سطح 1.05R ارتقا یافت.")
 
-        # ۵. پله نهایی TP3 (2.0R -> بستن ۴۰٪ باقیمانده / تمام حجم باقیمانده)
+        # ۴. پله نهایی TP3 (2.0R -> بستن ۴۰٪ باقیمانده / تمام حجم باقیمانده)
         if pos.tp3 > 0 and pos.tp2_hit and not pos.tp3_hit:
             tp3_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp3) or (
                 pos.side == OrderSide.SELL and current_low <= pos.tp3

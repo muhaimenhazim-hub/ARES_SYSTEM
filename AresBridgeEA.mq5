@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
 //|                            ARES AI TRADING SYSTEM - BRIDGE V15.1 |
-//|  1.0R BE, 1.1/1.5/2.0R STAGED EXITS, H4/D1 CANDLES & CALENDAR EA |
+//|  1.1R 30%+BE(SPREAD/COMM/SWAP), 1.5R 30%+1.05R, 2.0R 40% & M1 EA |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
 #property version   "15.10"
@@ -25,7 +25,7 @@ int OnInit()
 {
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V15.1 Initialized (1.0R BE, 1.1/1.5/2.0R Staged Exits, H4/D1 Candles & Calendar ON).");
+   Print("🚀 ARES Bridge V15.1 Initialized (1.1R 30%+BE, 1.5R 30%+1.05R, 2.0R 40%, M1 & Calendar ON).");
    ManagePositionsAndStagedExits();
    SyncAccountWithServer();
    ExportLiveCandlesFile();
@@ -94,7 +94,68 @@ double CalcSafePartialCloseVolume(string sym, double initVol, double curVol, dou
 }
 
 //+------------------------------------------------------------------+
-//| مدیریت ریسک‌فری در 1.0R و خروج پله‌ای 1.1R (30%) و 1.5R (30%)   |
+//| محاسبه دقیق نقطه سر به سر با احتساب اسپرد، کمیسیون و سواپ بروکر |
+//+------------------------------------------------------------------+
+double CalcBrokerBreakEvenSL(
+   ulong ticket, string sym, long posType, double priceOpen,
+   double riskDist, double remVol, int digits, double point,
+   double ask, double bid
+)
+{
+   double spreadPrice = MathMax(0.0, ask - bid);
+   double spreadBuf   = MathMax(2.0 * point, spreadPrice);
+
+   double curSwap   = PositionGetDouble(POSITION_SWAP);
+   long   posId     = PositionGetInteger(POSITION_IDENTIFIER);
+   double entryComm = 0.0;
+   double entryVol  = 0.0;
+
+   if(posId > 0 && HistorySelectByPosition(posId))
+   {
+      int deals = HistoryDealsTotal();
+      for(int d = 0; d < deals; d++)
+      {
+         ulong dt = HistoryDealGetTicket(d);
+         if(dt == 0) continue;
+         long dEntry = HistoryDealGetInteger(dt, DEAL_ENTRY);
+         if(dEntry == DEAL_ENTRY_IN)
+         {
+            entryComm += HistoryDealGetDouble(dt, DEAL_COMMISSION) + HistoryDealGetDouble(dt, DEAL_FEE);
+            entryVol  += HistoryDealGetDouble(dt, DEAL_VOLUME);
+         }
+      }
+   }
+
+   double estExitComm = (entryVol > 0.0) ? (entryComm * (remVol / entryVol)) : entryComm;
+   double netCostUsd  = MathMax(0.0, -(entryComm + estExitComm + curSwap));
+
+   double costOffset = 0.0;
+   if(netCostUsd > 0.0 && remVol > 0.0)
+   {
+      ENUM_ORDER_TYPE oType = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double testStep       = MathMax(100.0 * point, riskDist * 0.1);
+      double testTarget     = (posType == POSITION_TYPE_BUY) ? (priceOpen + testStep) : (priceOpen - testStep);
+      double profitTest     = 0.0;
+      if(OrderCalcProfit(oType, sym, remVol, priceOpen, testTarget, profitTest) && MathAbs(profitTest) > 0.0)
+      {
+         double usdPerPrice = MathAbs(profitTest) / testStep;
+         if(usdPerPrice > 0.0)
+            costOffset = netCostUsd / usdPerPrice;
+      }
+   }
+
+   double totalOffset = costOffset + spreadBuf;
+   double maxSafeOff  = riskDist * 0.40;
+   if(totalOffset > maxSafeOff) totalOffset = maxSafeOff;
+   if(totalOffset < point)      totalOffset = point;
+
+   if(posType == POSITION_TYPE_BUY)
+      return NormalizeDouble(priceOpen + totalOffset, digits);
+   return NormalizeDouble(priceOpen - totalOffset, digits);
+}
+
+//+------------------------------------------------------------------+
+//| مدیریت خروج پله‌ای 1.1R (30% + ریسک‌فری) و 1.5R (30% + 1.05R)   |
 //+------------------------------------------------------------------+
 void ManagePositionsAndStagedExits()
 {
@@ -147,39 +208,13 @@ void ManagePositionsAndStagedExits()
             (posType == POSITION_TYPE_SELL && sl > 0.0 && sl <= priceOpen))
             stage = 1;
       }
+      if(stage < 2 && initVol > 0.0 && curVol <= (initVol * 0.45 + 1e-9))
+         stage = 2;
 
       if(posType == POSITION_TYPE_BUY)
       {
-         // مرحله ۱: رسیدن به ریوارد 1.0R -> انتقال SL به سر به سر (Break-Even)
-         if(stage < 1 && bid >= (priceOpen + riskDist))
-         {
-            if(sl < priceOpen)
-            {
-               double beSL = NormalizeDouble(priceOpen + (riskDist * 0.05), digits);
-               if(beSL <= priceOpen) beSL = NormalizeDouble(priceOpen + point, digits);
-               double maxAllowedSL = NormalizeDouble(bid - stopsLevel - (2.0 * point), digits);
-               if(beSL > maxAllowedSL) beSL = maxAllowedSL;
-
-               if(beSL > sl && beSL >= priceOpen)
-               {
-                  SetSymbolFillingMode(sym);
-                  if(ExtTrade.PositionModify(ticket, beSL, tp))
-                  {
-                     stage = 1;
-                     GlobalVariableSet(gvStage, 1.0);
-                     Print("🛡️ [ARES 1.0R RISK-FREE]: BUY #", ticket, " (", sym, ") -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
-                  }
-               }
-            }
-            else
-            {
-               stage = 1;
-               GlobalVariableSet(gvStage, 1.0);
-            }
-         }
-
-         // مرحله ۲: رسیدن به ریوارد 1.1R (TP1) -> بستن 30% حجم اولیه
-         if(stage < 2 && bid >= (priceOpen + (riskDist * 1.1)))
+         // مرحله ۱: رسیدن به ریوارد 1.1R -> بستن 30% حجم اولیه + انتقال SL به نقطه ورود (اسپرد + کمیسیون + سواپ)
+         if(stage < 1 && bid >= (priceOpen + (riskDist * 1.1)))
          {
             double closeVol1 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.30);
             if(closeVol1 > 0.0)
@@ -187,22 +222,39 @@ void ManagePositionsAndStagedExits()
                SetSymbolFillingMode(sym);
                if(ExtTrade.PositionClosePartial(ticket, closeVol1))
                {
-                  stage = 2;
-                  GlobalVariableSet(gvStage, 2.0);
-                  curVol = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_VOLUME) : (curVol - closeVol1);
                   Print("💰 [ARES TP1 1.1R]: BUY #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol1, 2));
+                  if(PositionSelectByTicket(ticket))
+                     curVol = PositionGetDouble(POSITION_VOLUME);
+                  else
+                     curVol = MathMax(0.0, curVol - closeVol1);
                }
             }
             else
             {
-               stage = 2;
-               GlobalVariableSet(gvStage, 2.0);
                Print("ℹ️ [ARES TP1 1.1R]: BUY #", ticket, " (", sym, ") min-lot 0.01 protected at BE.");
             }
+
+            if(PositionSelectByTicket(ticket))
+            {
+               double curSL = PositionGetDouble(POSITION_SL);
+               double curTP = PositionGetDouble(POSITION_TP);
+               double beSL  = CalcBrokerBreakEvenSL(ticket, sym, posType, priceOpen, riskDist, curVol, digits, point, ask, bid);
+               double maxAllowedSL = NormalizeDouble(bid - stopsLevel - (2.0 * point), digits);
+               if(beSL > maxAllowedSL) beSL = maxAllowedSL;
+
+               if(curSL < priceOpen && beSL > curSL && beSL >= priceOpen)
+               {
+                  SetSymbolFillingMode(sym);
+                  if(ExtTrade.PositionModify(ticket, beSL, curTP))
+                     Print("🛡️ [ARES 1.1R RISK-FREE]: BUY #", ticket, " (", sym, ") -> SL moved to Break-Even (Spread+Comm+Swap): ", DoubleToString(beSL, digits));
+               }
+            }
+            stage = 1;
+            GlobalVariableSet(gvStage, 1.0);
          }
 
-         // مرحله ۳: رسیدن به ریوارد 1.5R (TP2) -> بستن 30% حجم اولیه + تریلینگ SL به 1.1R
-         if(stage < 3 && bid >= (priceOpen + (riskDist * 1.5)))
+         // مرحله ۲: رسیدن به ریوارد 1.5R (TP2) -> بستن 30% حجم اولیه + انتقال SL به 1.05R
+         if(stage < 2 && bid >= (priceOpen + (riskDist * 1.5)))
          {
             double closeVol2 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.60);
             bool partialOk = true;
@@ -214,60 +266,28 @@ void ManagePositionsAndStagedExits()
                   Print("💰 [ARES TP2 1.5R]: BUY #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol2, 2));
             }
 
-            if(partialOk && PositionSelectByTicket(ticket))
+            if((partialOk || closeVol2 <= 0.0) && PositionSelectByTicket(ticket))
             {
                double curSL = PositionGetDouble(POSITION_SL);
                double curTP = PositionGetDouble(POSITION_TP);
-               double trailSL = NormalizeDouble(priceOpen + (riskDist * 1.1), digits);
+               double trailSL = NormalizeDouble(priceOpen + (riskDist * 1.05), digits);
                double maxAllowedSL = NormalizeDouble(bid - stopsLevel - (2.0 * point), digits);
                if(trailSL > maxAllowedSL) trailSL = maxAllowedSL;
                if(trailSL > curSL)
                {
                   SetSymbolFillingMode(sym);
-                  ExtTrade.PositionModify(ticket, trailSL, curTP);
+                  if(ExtTrade.PositionModify(ticket, trailSL, curTP))
+                     Print("🔒 [ARES 1.5R TRAIL 1.05R]: BUY #", ticket, " (", sym, ") -> SL moved to 1.05R: ", DoubleToString(trailSL, digits));
                }
-               stage = 3;
-               GlobalVariableSet(gvStage, 3.0);
-            }
-            else if(closeVol2 <= 0.0)
-            {
-               stage = 3;
-               GlobalVariableSet(gvStage, 3.0);
+               stage = 2;
+               GlobalVariableSet(gvStage, 2.0);
             }
          }
       }
       else if(posType == POSITION_TYPE_SELL)
       {
-         // مرحله ۱: رسیدن به ریوارد 1.0R -> انتقال SL به سر به سر (Break-Even)
-         if(stage < 1 && ask <= (priceOpen - riskDist))
-         {
-            if(sl == 0.0 || sl > priceOpen)
-            {
-               double beSL = NormalizeDouble(priceOpen - (riskDist * 0.05), digits);
-               if(beSL >= priceOpen) beSL = NormalizeDouble(priceOpen - point, digits);
-               double minAllowedSL = NormalizeDouble(ask + stopsLevel + (2.0 * point), digits);
-               if(beSL < minAllowedSL) beSL = minAllowedSL;
-
-               if((sl == 0.0 || beSL < sl) && beSL <= priceOpen)
-               {
-                  SetSymbolFillingMode(sym);
-                  if(ExtTrade.PositionModify(ticket, beSL, tp))
-                  {
-                     stage = 1;
-                     GlobalVariableSet(gvStage, 1.0);
-                     Print("🛡️ [ARES 1.0R RISK-FREE]: SELL #", ticket, " (", sym, ") -> SL moved to Break-Even: ", DoubleToString(beSL, digits));
-                  }
-               }
-            }
-            else
-            {
-               stage = 1;
-               GlobalVariableSet(gvStage, 1.0);
-            }
-         }
-
-         // مرحله ۲: رسیدن به ریوارد 1.1R (TP1) -> بستن 30% حجم اولیه
-         if(stage < 2 && ask <= (priceOpen - (riskDist * 1.1)))
+         // مرحله ۱: رسیدن به ریوارد 1.1R -> بستن 30% حجم اولیه + انتقال SL به نقطه ورود (اسپرد + کمیسیون + سواپ)
+         if(stage < 1 && ask <= (priceOpen - (riskDist * 1.1)))
          {
             double closeVol1 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.30);
             if(closeVol1 > 0.0)
@@ -275,22 +295,39 @@ void ManagePositionsAndStagedExits()
                SetSymbolFillingMode(sym);
                if(ExtTrade.PositionClosePartial(ticket, closeVol1))
                {
-                  stage = 2;
-                  GlobalVariableSet(gvStage, 2.0);
-                  curVol = PositionSelectByTicket(ticket) ? PositionGetDouble(POSITION_VOLUME) : (curVol - closeVol1);
                   Print("💰 [ARES TP1 1.1R]: SELL #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol1, 2));
+                  if(PositionSelectByTicket(ticket))
+                     curVol = PositionGetDouble(POSITION_VOLUME);
+                  else
+                     curVol = MathMax(0.0, curVol - closeVol1);
                }
             }
             else
             {
-               stage = 2;
-               GlobalVariableSet(gvStage, 2.0);
                Print("ℹ️ [ARES TP1 1.1R]: SELL #", ticket, " (", sym, ") min-lot 0.01 protected at BE.");
             }
+
+            if(PositionSelectByTicket(ticket))
+            {
+               double curSL = PositionGetDouble(POSITION_SL);
+               double curTP = PositionGetDouble(POSITION_TP);
+               double beSL  = CalcBrokerBreakEvenSL(ticket, sym, posType, priceOpen, riskDist, curVol, digits, point, ask, bid);
+               double minAllowedSL = NormalizeDouble(ask + stopsLevel + (2.0 * point), digits);
+               if(beSL < minAllowedSL) beSL = minAllowedSL;
+
+               if((curSL == 0.0 || curSL > priceOpen) && (curSL == 0.0 || beSL < curSL) && beSL <= priceOpen)
+               {
+                  SetSymbolFillingMode(sym);
+                  if(ExtTrade.PositionModify(ticket, beSL, curTP))
+                     Print("🛡️ [ARES 1.1R RISK-FREE]: SELL #", ticket, " (", sym, ") -> SL moved to Break-Even (Spread+Comm+Swap): ", DoubleToString(beSL, digits));
+               }
+            }
+            stage = 1;
+            GlobalVariableSet(gvStage, 1.0);
          }
 
-         // مرحله ۳: رسیدن به ریوارد 1.5R (TP2) -> بستن 30% حجم اولیه + تریلینگ SL به 1.1R
-         if(stage < 3 && ask <= (priceOpen - (riskDist * 1.5)))
+         // مرحله ۲: رسیدن به ریوارد 1.5R (TP2) -> بستن 30% حجم اولیه + انتقال SL به 1.05R
+         if(stage < 2 && ask <= (priceOpen - (riskDist * 1.5)))
          {
             double closeVol2 = CalcSafePartialCloseVolume(sym, initVol, curVol, 0.60);
             bool partialOk = true;
@@ -302,25 +339,21 @@ void ManagePositionsAndStagedExits()
                   Print("💰 [ARES TP2 1.5R]: SELL #", ticket, " (", sym, ") closed 30% partial: ", DoubleToString(closeVol2, 2));
             }
 
-            if(partialOk && PositionSelectByTicket(ticket))
+            if((partialOk || closeVol2 <= 0.0) && PositionSelectByTicket(ticket))
             {
                double curSL = PositionGetDouble(POSITION_SL);
                double curTP = PositionGetDouble(POSITION_TP);
-               double trailSL = NormalizeDouble(priceOpen - (riskDist * 1.1), digits);
+               double trailSL = NormalizeDouble(priceOpen - (riskDist * 1.05), digits);
                double minAllowedSL = NormalizeDouble(ask + stopsLevel + (2.0 * point), digits);
                if(trailSL < minAllowedSL) trailSL = minAllowedSL;
                if(curSL == 0.0 || trailSL < curSL)
                {
                   SetSymbolFillingMode(sym);
-                  ExtTrade.PositionModify(ticket, trailSL, curTP);
+                  if(ExtTrade.PositionModify(ticket, trailSL, curTP))
+                     Print("🔒 [ARES 1.5R TRAIL 1.05R]: SELL #", ticket, " (", sym, ") -> SL moved to 1.05R: ", DoubleToString(trailSL, digits));
                }
-               stage = 3;
-               GlobalVariableSet(gvStage, 3.0);
-            }
-            else if(closeVol2 <= 0.0)
-            {
-               stage = 3;
-               GlobalVariableSet(gvStage, 3.0);
+               stage = 2;
+               GlobalVariableSet(gvStage, 2.0);
             }
          }
       }
