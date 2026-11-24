@@ -655,7 +655,7 @@ class AresMasterSystem:
         self.gold_used_refs[pend["ref_id"]] = now_ts
         self.gold_fast_pending = None
 
-        tp1 = (current_price + sl_dist * 1.1) if side == "BUY" else (current_price - sl_dist * 1.1)
+        tp1 = (current_price + sl_dist * 1.0) if side == "BUY" else (current_price - sl_dist * 1.0)
         tp2 = (current_price + sl_dist * 1.5) if side == "BUY" else (current_price - sl_dist * 1.5)
         tp3 = (current_price + sl_dist * 2.0) if side == "BUY" else (current_price - sl_dist * 2.0)
 
@@ -920,7 +920,7 @@ class AresMasterSystem:
                         real_tp3 = float(res.get("take_profit") or opportunity.take_profit_3)
                         exec_vol = float(res.get("volume") or vol)
                         is_buy = opportunity.direction == "BUY"
-                        tp1 = (real_entry + (sl_dist * 1.1)) if is_buy else (real_entry - (sl_dist * 1.1))
+                        tp1 = (real_entry + (sl_dist * 1.0)) if is_buy else (real_entry - (sl_dist * 1.0))
                         tp2 = (real_entry + (sl_dist * 1.5)) if is_buy else (real_entry - (sl_dist * 1.5))
 
                         ok_pos, pos_obj, _ = self.trade_engine.open_position(

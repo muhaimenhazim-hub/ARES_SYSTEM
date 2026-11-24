@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 04: TRADE & POSITION MANAGEMENT ENGINE
-VERSION: 14.3 (1.1R 30%+BE, 1.5R 30%+1.05R TRAIL, 2.0R 40% & 0.01 LOT GUARD)
+VERSION: 14.4 (1.0R 30%+BE, 1.5R 30%+0.5R TRAIL, 2.0R 40% & 0.01 LOT GUARD)
 ================================================================================
 """
 
@@ -341,7 +341,7 @@ class TradePositionManagementEngine:
                     "position": pos.to_dict(),
                 }
 
-        # ۲. پله اول TP1 (1.1R -> بستن ۳۰٪ حجم اولیه + انتقال SL به سر به سر با احتساب هزینه کارمزد/اسپرد)
+        # ۲. پله اول TP1 (1.0R -> بستن ۳۰٪ حجم اولیه + انتقال SL به سر به سر با احتساب هزینه کارمزد/اسپرد)
         if pos.tp1 > 0 and not pos.tp1_hit:
             tp1_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp1) or (
                 pos.side == OrderSide.SELL and current_low <= pos.tp1
@@ -374,9 +374,9 @@ class TradePositionManagementEngine:
                             fee_paid=fee,
                         )
                     )
-                    events.append("TP1 (1.1R) محقق شد (۳۰٪ خروج پله‌ای).")
+                    events.append("TP1 (1.0R) محقق شد (۳۰٪ خروج پله‌ای).")
                 else:
-                    events.append("TP1 (1.1R) لمس شد — به دلیل حداقل حجم 0.01 پوزیشن با Break-Even حفظ شد.")
+                    events.append("TP1 (1.0R) لمس شد — به دلیل حداقل حجم 0.01 پوزیشن با Break-Even حفظ شد.")
 
                 if not pos.is_break_even:
                     fee_buffer = (
@@ -392,7 +392,7 @@ class TradePositionManagementEngine:
                     pos.is_break_even = True
                     events.append("حد ضرر به نقطه ورود (با احتساب هزینه کارمزد/اسپرد) منتقل شد.")
 
-        # ۳. پله دوم TP2 (1.5R -> بستن ۳۰٪ حجم اولیه + تریلینگ استاپ به سطح 1.05R)
+        # ۳. پله دوم TP2 (1.5R -> بستن ۳۰٪ حجم اولیه + انتقال SL به سطح 0.5R)
         if pos.tp2 > 0 and pos.tp1_hit and not pos.tp2_hit:
             tp2_reached = (pos.side == OrderSide.BUY and current_high >= pos.tp2) or (
                 pos.side == OrderSide.SELL and current_low <= pos.tp2
@@ -427,13 +427,13 @@ class TradePositionManagementEngine:
                     )
                 if risk_dist > 0:
                     pos.stop_loss = (
-                        (pos.entry_price + (risk_dist * 1.05))
+                        (pos.entry_price + (risk_dist * 0.50))
                         if pos.side == OrderSide.BUY
-                        else (pos.entry_price - (risk_dist * 1.05))
+                        else (pos.entry_price - (risk_dist * 0.50))
                     )
                 elif pos.tp1 > 0:
                     pos.stop_loss = pos.tp1
-                events.append("TP2 (1.5R) محقق شد (۳۰٪ خروج پله‌ای) — تریلینگ استاپ به سطح 1.05R ارتقا یافت.")
+                events.append("TP2 (1.5R) محقق شد (۳۰٪ خروج پله‌ای) — تریلینگ استاپ به سطح 0.5R ارتقا یافت.")
 
         # ۴. پله نهایی TP3 (2.0R -> بستن ۴۰٪ باقیمانده / تمام حجم باقیمانده)
         if pos.tp3 > 0 and pos.tp2_hit and not pos.tp3_hit:

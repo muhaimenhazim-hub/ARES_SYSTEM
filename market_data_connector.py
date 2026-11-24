@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 1: UNIFIED MULTI-MARKET DATA CONNECTOR (Crypto & Forex & Indices)
-VERSION: 14.2 (MT5 LIVE CANDLES WITH H4/D1 SUPPORT & YAHOO/PAXG AUTO-FALLBACK)
+VERSION: 14.3 (2s LIVE MT5 QUOTES FOR ALL SYMBOLS + 1m XAUUSD + H4/D1 SUPPORT)
 ================================================================================
 """
 
@@ -19,7 +19,9 @@ import pandas as pd
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LIVE_CANDLES_FILE = os.path.join(BASE_DIR, "ares_live_candles.json")
+BRIDGE_CACHE_FILE = os.path.join(BASE_DIR, "ares_bridge_cache.json")
 LIVE_CANDLES_MAX_AGE_SECONDS = 90.0
+LIVE_QUOTE_MAX_AGE_SECONDS = 15.0
 
 
 class BinanceFuturesConnector:
@@ -182,9 +184,9 @@ class MT5ForexConnector:
 
 
 class AresUnifiedDataService:
-    """هاب مرکزی داده‌های زنده ARES با اولویت کندل‌های لحظه‌ای متاتریدر (MT5_LIVE) و پشتیبان یاهو"""
+    """هاب مرکزی داده‌های زنده ARES با اولویت قیمت ۲ ثانیه‌ای و کندل‌های لحظه‌ای متاتریدر (MT5_LIVE)"""
 
-    def __init__(self, cache_ttl_seconds: float = 4.0):
+    def __init__(self, cache_ttl_seconds: float = 1.5):
         self.binance = BinanceFuturesConnector()
         self.mt5 = MT5ForexConnector()
         self.cache_ttl = cache_ttl_seconds
@@ -203,6 +205,49 @@ class AresUnifiedDataService:
                 df[col] = df[col].astype(np.float64)
             df = df.sort_values("timestamp").reset_index(drop=True)
             return df
+        except Exception:
+            return None
+
+    @staticmethod
+    def _get_live_mt5_quote_price(symbol: str, preferred_login: str = "") -> Optional[float]:
+        """خواندن قیمت لحظه‌ای ۲ ثانیه‌ای (Bid) از کش همگام‌سازی متاتریدر برای تمام نمادها"""
+        if not os.path.exists(BRIDGE_CACHE_FILE):
+            return None
+        try:
+            with open(BRIDGE_CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            if not isinstance(cache, dict):
+                return None
+
+            now_ts = time.time()
+            best_ts = 0.0
+            best_bid: Optional[float] = None
+            pref = str(preferred_login or "").strip()
+
+            for snap in cache.values():
+                if not isinstance(snap, dict):
+                    continue
+                ts = float(snap.get("last_sync_ts", 0.0) or 0.0)
+                if ts <= 0.0 or (now_ts - ts) > LIVE_QUOTE_MAX_AGE_SECONDS:
+                    continue
+                quotes = snap.get("live_quotes")
+                if not isinstance(quotes, dict):
+                    continue
+                q = quotes.get(symbol)
+                if not isinstance(q, dict):
+                    continue
+                bid = float(q.get("bid", 0.0) or 0.0)
+                if bid <= 0.0:
+                    continue
+
+                snap_login = str(snap.get("login", "")).strip()
+                if pref and snap_login == pref:
+                    return bid
+                if ts > best_ts:
+                    best_ts = ts
+                    best_bid = bid
+
+            return best_bid
         except Exception:
             return None
 
@@ -235,7 +280,13 @@ class AresUnifiedDataService:
             df_d1 = self._rates_to_dataframe(sym_entry.get("1d"), min_len=4)
             df_1m = self._rates_to_dataframe(sym_entry.get("1m"), min_len=20)
 
-            current_price = float(df_1m.iloc[-1]["close"]) if df_1m is not None else float(df_ltf.iloc[-1]["close"])
+            preferred_login = str(sym_entry.get("login", "")).strip()
+            live_bid = self._get_live_mt5_quote_price(symbol, preferred_login=preferred_login)
+            current_price = (
+                live_bid
+                if live_bid is not None
+                else (float(df_1m.iloc[-1]["close"]) if df_1m is not None else float(df_ltf.iloc[-1]["close"]))
+            )
             if current_price <= 0.0:
                 return None
 
@@ -305,7 +356,12 @@ class AresUnifiedDataService:
         df_h4 = self.mt5.fetch_ohlcv(symbol, timeframe="4h", limit=30, min_len=8)
         df_d1 = self.mt5.fetch_ohlcv(symbol, timeframe="1d", limit=20, min_len=4)
         df_1m = self.mt5.fetch_ohlcv(symbol, timeframe="1m", limit=65, min_len=20) if symbol == "XAUUSD" else None
-        current_price = float(df_1m.iloc[-1]["close"]) if df_1m is not None else float(df_ltf.iloc[-1]["close"])
+        live_bid = self._get_live_mt5_quote_price(symbol)
+        current_price = (
+            live_bid
+            if live_bid is not None
+            else (float(df_1m.iloc[-1]["close"]) if df_1m is not None else float(df_ltf.iloc[-1]["close"]))
+        )
 
         bundle = {
             "symbol": symbol,

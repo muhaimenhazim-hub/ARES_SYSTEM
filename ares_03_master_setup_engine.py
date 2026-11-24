@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 FILE 03: MASTER SETUP ENGINE
-VERSION: 14.4 (FVG-ONLY CRT+MSS+FVG, DAILY BIAS SCORING & 1.1R/1.5R/2.0R TARGETS)
+VERSION: 14.5 (FVG-ONLY CRT+MSS+FVG, DAILY BIAS SCORING & 1.0R/1.5R/2.0R TARGETS)
 ================================================================================
 """
 
@@ -471,7 +471,7 @@ class MasterSetupEngine:
                 risk_dist = min_sl_dist
                 stop_loss = entry_price - risk_dist
 
-            tp1 = entry_price + (risk_dist * 1.1)
+            tp1 = entry_price + (risk_dist * 1.0)
             tp2 = entry_price + (risk_dist * 1.5)
             tp3 = entry_price + (risk_dist * 2.0)
 
@@ -482,7 +482,7 @@ class MasterSetupEngine:
                 risk_dist = min_sl_dist
                 stop_loss = entry_price + risk_dist
 
-            tp1 = entry_price - (risk_dist * 1.1)
+            tp1 = entry_price - (risk_dist * 1.0)
             tp2 = entry_price - (risk_dist * 1.5)
             tp3 = entry_price - (risk_dist * 2.0)
         else:
@@ -532,7 +532,7 @@ class MasterSetupEngine:
                 rejection_reason=f"نسبت سود به زیان ({rr_ratio:.2f}) کمتر از حداقل مجاز ({self.min_rr_ratio}) است.",
             )
 
-        confirmations.append(f"نسبت ریسک به ریوارد نهایی {rr_ratio:.2f} معتبر است (خروج پله‌ای 1.1R / 1.5R / 2.0R).")
+        confirmations.append(f"نسبت ریسک به ریوارد نهایی {rr_ratio:.2f} معتبر است (خروج پله‌ای 1.0R / 1.5R / 2.0R).")
         confirmations.append(f"امتیاز ستاپ: {total_score:.1f} / 100 — ریسک پیشنهادی: {suggested_risk}%")
 
         return SetupOpportunity(
