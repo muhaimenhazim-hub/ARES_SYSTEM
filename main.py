@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import sys
 import time
 from typing import Any, Dict, List, Optional
+import pandas as pd
 
 import account_config
 from ares_01_crt_strategy_engine import CRTStrategyEngine
@@ -67,6 +68,8 @@ class AresMasterSystem:
         self._risk_alert_last_ts: Dict[str, float] = {}
         self.recent_order_metadata: Dict[str, Dict[str, Any]] = {}
         self._bias_protect_last_ts: Dict[int, float] = {}
+        self.gold_fast_pending: Optional[Dict[str, Any]] = None
+        self.gold_used_refs: Dict[str, float] = {}
 
         self._restore_open_positions_from_db()
 
@@ -354,6 +357,330 @@ class AresMasterSystem:
                     return True
         return False
 
+    def _detect_gold_fs5_ict_sweep_limit(
+        self,
+        bundle: Dict[str, Any],
+        daily_bias: str,
+        h1_trend: str,
+    ) -> Optional[Dict[str, Any]]:
+        """FS5: ICT Swing Liquidity Sweep + Displacement + FVG Retest روی M5 با هم‌راستایی H1/H4/D1"""
+        df_m5 = bundle.get("df_ltf")
+        if df_m5 is None or len(df_m5) < 35:
+            return None
+        if daily_bias == "NEUTRAL" and h1_trend == "RANGING":
+            return None
+
+        allow_buy = (h1_trend == "BULLISH" and daily_bias != "BEARISH") or (daily_bias == "BULLISH" and h1_trend != "BEARISH")
+        allow_sell = (h1_trend == "BEARISH" and daily_bias != "BULLISH") or (daily_bias == "BEARISH" and h1_trend != "BULLISH")
+        if allow_buy == allow_sell:
+            return None
+
+        direction = "BUY" if allow_buy else "SELL"
+        df_c = df_m5.iloc[:-1].tail(55).reset_index(drop=True)
+        if len(df_c) < 30:
+            return None
+
+        atr_s = self.crt_engine.calculate_atr(df_c)
+        atr_m5 = float(atr_s.iloc[-1]) if len(atr_s) > 0 else 0.0
+        if atr_m5 <= 0.0:
+            return None
+
+        swing_h, swing_l = self.crt_engine.detect_swings_causal(df_c)
+        recent_start = max(0, len(df_c) - 4)
+        recent_slice = df_c.iloc[recent_start:]
+        low_rec = float(recent_slice["low"].min())
+        high_rec = float(recent_slice["high"].max())
+        last_close = float(df_c.iloc[-1]["close"])
+
+        swept_lvl = None
+        ref_id = ""
+        if direction == "BUY":
+            for s_idx in reversed(swing_l[swing_l].index.tolist()):
+                if s_idx >= recent_start:
+                    continue
+                lvl = float(df_c.iloc[s_idx]["low"])
+                if low_rec < lvl and last_close > lvl and (0.05 * atr_m5 <= (lvl - low_rec) <= 1.80 * atr_m5):
+                    swept_lvl = lvl
+                    ref_id = f"FS5_{df_c.iloc[s_idx]['timestamp']}"
+                    break
+        else:
+            for s_idx in reversed(swing_h[swing_h].index.tolist()):
+                if s_idx >= recent_start:
+                    continue
+                lvl = float(df_c.iloc[s_idx]["high"])
+                if high_rec > lvl and last_close < lvl and (0.05 * atr_m5 <= (high_rec - lvl) <= 1.80 * atr_m5):
+                    swept_lvl = lvl
+                    ref_id = f"FS5_{df_c.iloc[s_idx]['timestamp']}"
+                    break
+
+        if swept_lvl is None or ref_id in self.gold_used_refs:
+            return None
+
+        is_disp = False
+        for _, row in recent_slice.iterrows():
+            rng_k = float(row["high"] - row["low"])
+            if rng_k <= 0:
+                continue
+            is_dir = (float(row["close"]) > float(row["open"])) if direction == "BUY" else (float(row["close"]) < float(row["open"]))
+            body_r = abs(float(row["close"] - row["open"])) / rng_k
+            if is_dir and (rng_k / atr_m5) >= 1.15 and body_r >= 0.50:
+                is_disp = True
+                break
+        if not is_disp:
+            return None
+
+        sw_ts = self.crt_engine._normalize_ts(df_c.iloc[recent_start]["timestamp"])
+        exp_fvg = "BULLISH" if direction == "BUY" else "BEARISH"
+        fvgs = [
+            f for f in self.crt_engine.detect_fvgs(df_c, "M5")
+            if f.direction == exp_fvg and self.crt_engine._normalize_ts(f.created_time) >= (sw_ts - pd.Timedelta(minutes=5))
+        ]
+        if not fvgs:
+            return None
+
+        fvg = fvgs[-1]
+        fvg_mid = (fvg.top + fvg.bottom) * 0.5
+        limit_px = (fvg.top * 0.5 + fvg_mid * 0.5) if direction == "BUY" else (fvg.bottom * 0.5 + fvg_mid * 0.5)
+        sl_px = (low_rec - 0.15 * atr_m5) if direction == "BUY" else (high_rec + 0.15 * atr_m5)
+        min_sl = max(0.55 * atr_m5, limit_px * 0.0005)
+        sl_dist = abs(limit_px - sl_px)
+        if sl_dist < min_sl:
+            sl_dist = min_sl
+            sl_px = (limit_px - sl_dist) if direction == "BUY" else (limit_px + sl_dist)
+        if sl_dist > max(2.20 * atr_m5, limit_px * 0.0030):
+            return None
+
+        return {
+            "ref_id": ref_id,
+            "setup_name": "ICT_SWEEP_FVG",
+            "direction": direction,
+            "limit_px": limit_px,
+            "sl_px": sl_px,
+            "atr_m5": atr_m5,
+            "daily_bias": daily_bias,
+            "expires_ts": time.time() + 1500.0,
+        }
+
+    def _detect_gold_fs6_crt_m1_limit(
+        self,
+        bundle: Dict[str, Any],
+        daily_bias: str,
+        h1_trend: str,
+    ) -> Optional[Dict[str, Any]]:
+        """FS6: فست اسکالپ CRT M15 -> Sweep/MSS/FVG روی 1m با هم‌راستایی سخت‌گیرانه H1/H4/D1"""
+        df_1m = bundle.get("df_1m")
+        df_m15 = bundle.get("df_mtf")
+        df_m5 = bundle.get("df_ltf")
+        if df_1m is None or df_m15 is None or df_m5 is None:
+            return None
+        if len(df_1m) < 25 or len(df_m15) < 5 or len(df_m5) < 16:
+            return None
+
+        df_1m_c = df_1m.iloc[:-1].tail(65).reset_index(drop=True)
+        df_m15_c = df_m15.iloc[:-1].reset_index(drop=True)
+        df_m5_c = df_m5.iloc[:-1].reset_index(drop=True)
+
+        atr_m5 = float(self.crt_engine.calculate_atr(df_m5_c).iloc[-1])
+        atr_1m = float(self.crt_engine.calculate_atr(df_1m_c).iloc[-1])
+        if atr_m5 <= 0 or atr_1m <= 0:
+            return None
+
+        last_1m = df_1m_c.iloc[-1]
+        m1_ts = self.crt_engine._normalize_ts_series(df_1m_c["timestamp"])
+        sh_1m, sl_1m = self.crt_engine.detect_swings_causal(df_1m_c)
+        all_fvgs_1m = self.crt_engine.detect_fvgs(df_1m_c, "M1")
+
+        for off in (-1, -2):
+            if abs(off) > len(df_m15_c):
+                continue
+            r = df_m15_c.iloc[off]
+            t0 = self.crt_engine._normalize_ts(r["timestamp"])
+            ref_close_ts = t0 + pd.Timedelta(minutes=15)
+            ref_high = float(r["high"])
+            ref_low = float(r["low"])
+            ref_id = f"FS6_{t0.isoformat()}"
+            if ref_id in self.gold_used_refs:
+                continue
+            if (ref_high - ref_low) < (0.25 * atr_m5):
+                continue
+
+            since_ref = df_1m_c[m1_ts >= ref_close_ts]
+            if since_ref.empty or len(since_ref) > 20:
+                continue
+
+            recent_1m = since_ref.tail(15)
+            lowest_1m = float(recent_1m["low"].min())
+            highest_1m = float(recent_1m["high"].max())
+
+            min_pen, max_pen = 0.05 * atr_m5, 2.00 * atr_m5
+            bull_sw = lowest_1m < ref_low and (min_pen <= (ref_low - lowest_1m) <= max_pen) and float(last_1m["close"]) > ref_low
+            bear_sw = highest_1m > ref_high and (min_pen <= (highest_1m - ref_high) <= max_pen) and float(last_1m["close"]) < ref_high
+            if bull_sw == bear_sw:
+                continue
+
+            direction = "BUY" if bull_sw else "SELL"
+            if direction == "BUY" and (daily_bias == "BEARISH" or h1_trend == "BEARISH" or (daily_bias == "NEUTRAL" and h1_trend != "BULLISH")):
+                continue
+            if direction == "SELL" and (daily_bias == "BULLISH" or h1_trend == "BULLISH" or (daily_bias == "NEUTRAL" and h1_trend != "BEARISH")):
+                continue
+
+            sw_rel = int(recent_1m["low"].to_numpy().argmin()) if direction == "BUY" else int(recent_1m["high"].to_numpy().argmax())
+            sw_ts = self.crt_engine._normalize_ts(recent_1m.iloc[sw_rel]["timestamp"])
+            is_disp = False
+            for _, row in recent_1m.iloc[sw_rel:].iterrows():
+                rng_k = float(row["high"] - row["low"])
+                if rng_k <= 0:
+                    continue
+                is_dir = (float(row["close"]) > float(row["open"])) if direction == "BUY" else (float(row["close"]) < float(row["open"]))
+                if is_dir and (rng_k / atr_1m) >= 1.15 and (abs(float(row["close"] - row["open"])) / rng_k) >= 0.50:
+                    is_disp = True
+                    break
+            if not is_disp:
+                continue
+
+            mss_ok = False
+            if direction == "BUY" and float(last_1m["close"]) > ref_low:
+                for s_idx in reversed(sh_1m[sh_1m].index.tolist()[-3:]):
+                    post = df_1m_c.iloc[s_idx + 1:]
+                    if len(post) > 0 and float(post["close"].max()) > float(df_1m_c.iloc[s_idx]["high"]):
+                        mss_ok = True
+                        break
+            elif direction == "SELL" and float(last_1m["close"]) < ref_high:
+                for s_idx in reversed(sl_1m[sl_1m].index.tolist()[-3:]):
+                    post = df_1m_c.iloc[s_idx + 1:]
+                    if len(post) > 0 and float(post["close"].min()) < float(df_1m_c.iloc[s_idx]["low"]):
+                        mss_ok = True
+                        break
+            if not mss_ok:
+                continue
+
+            exp_fvg = "BULLISH" if direction == "BUY" else "BEARISH"
+            fvgs = [
+                f for f in all_fvgs_1m
+                if f.direction == exp_fvg and self.crt_engine._normalize_ts(f.created_time) >= (sw_ts - pd.Timedelta(minutes=2))
+            ]
+            if not fvgs:
+                continue
+
+            fvg = fvgs[-1]
+            fvg_mid = (fvg.top + fvg.bottom) * 0.5
+            limit_px = (fvg.top * 0.5 + fvg_mid * 0.5) if direction == "BUY" else (fvg.bottom * 0.5 + fvg_mid * 0.5)
+            sl_px = (lowest_1m - 0.15 * atr_m5) if direction == "BUY" else (highest_1m + 0.15 * atr_m5)
+            min_sl = max(0.55 * atr_m5, limit_px * 0.0005)
+            sl_dist = abs(limit_px - sl_px)
+            if sl_dist < min_sl:
+                sl_dist = min_sl
+                sl_px = (limit_px - sl_dist) if direction == "BUY" else (limit_px + sl_dist)
+            if sl_dist > max(2.20 * atr_m5, limit_px * 0.0030):
+                return None
+
+            return {
+                "ref_id": ref_id,
+                "setup_name": "CRT_M15_M1_FVG",
+                "direction": direction,
+                "limit_px": limit_px,
+                "sl_px": sl_px,
+                "atr_m5": atr_m5,
+                "daily_bias": daily_bias,
+                "expires_ts": time.time() + 600.0,
+            }
+        return None
+
+    def _evaluate_gold_fast_scalp_opportunity(
+        self,
+        bundle: Dict[str, Any],
+        current_price: float,
+    ) -> Optional[Any]:
+        """اجرای فست اسکالپ طلا (FS5 + FS6) با ریسک ثابت ۰.۵٪ در بازه 07:00-20:00 UTC"""
+        now_ts = time.time()
+        for k in [rk for rk, ts in self.gold_used_refs.items() if (now_ts - ts) > 86400.0]:
+            del self.gold_used_refs[k]
+
+        utc_hour = datetime.now(timezone.utc).hour
+        if not (7 <= utc_hour < 20):
+            self.gold_fast_pending = None
+            return None
+
+        if self.gold_fast_pending is None:
+            daily_bias, _ = self.smc_engine.evaluate_daily_bias(
+                df_h4=bundle.get("df_h4"),
+                df_d1=bundle.get("df_d1"),
+            )
+            h1_smc = self.smc_engine.analyze_market(
+                "XAUUSD",
+                "FOREX_OR_INDICES",
+                bundle["df_htf"],
+                timeframe_label="H1",
+                df_h4=bundle.get("df_h4"),
+                df_d1=bundle.get("df_d1"),
+            )
+            h1_trend = str(h1_smc.trend_direction).upper()
+
+            setup_cand = self._detect_gold_fs5_ict_sweep_limit(bundle, daily_bias, h1_trend)
+            if setup_cand is None:
+                setup_cand = self._detect_gold_fs6_crt_m1_limit(bundle, daily_bias, h1_trend)
+            if setup_cand is not None:
+                self.gold_fast_pending = setup_cand
+
+        pend = self.gold_fast_pending
+        if pend is None:
+            return None
+
+        if now_ts > float(pend["expires_ts"]):
+            self.gold_fast_pending = None
+            return None
+
+        side = pend["direction"]
+        sl_px = float(pend["sl_px"])
+        limit_px = float(pend["limit_px"])
+        atr_m5 = float(pend["atr_m5"])
+
+        if (side == "BUY" and current_price <= sl_px) or (side == "SELL" and current_price >= sl_px):
+            self.gold_fast_pending = None
+            return None
+
+        filled = (side == "BUY" and current_price <= limit_px) or (side == "SELL" and current_price >= limit_px)
+        if not filled:
+            return None
+
+        sl_dist = abs(current_price - sl_px)
+        min_sl = max(0.55 * atr_m5, current_price * 0.0005)
+        if sl_dist < min_sl:
+            sl_dist = min_sl
+            sl_px = (current_price - sl_dist) if side == "BUY" else (current_price + sl_dist)
+        if sl_dist > max(2.20 * atr_m5, current_price * 0.0030):
+            self.gold_fast_pending = None
+            return None
+
+        self.gold_used_refs[pend["ref_id"]] = now_ts
+        self.gold_fast_pending = None
+
+        tp1 = (current_price + sl_dist * 1.1) if side == "BUY" else (current_price - sl_dist * 1.1)
+        tp2 = (current_price + sl_dist * 1.5) if side == "BUY" else (current_price - sl_dist * 1.5)
+        tp3 = (current_price + sl_dist * 2.0) if side == "BUY" else (current_price - sl_dist * 2.0)
+
+        from ares_03_master_setup_engine import SetupOpportunity
+        return SetupOpportunity(
+            opportunity_id=f"OPP_XAUFS_{int(now_ts)}",
+            symbol="XAUUSD",
+            market="FOREX_OR_INDICES",
+            direction=side,
+            setup_name=pend["setup_name"],
+            entry_price=current_price,
+            stop_loss=sl_px,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            take_profit_3=tp3,
+            risk_reward_ratio=2.0,
+            total_score=80.0,
+            score_breakdown={"gold_fast_scalp": 80.0},
+            suggested_risk_pct=0.5,
+            is_counter_trend=False,
+            status="APPROVED",
+            daily_bias=pend["daily_bias"],
+            confirmations=[f"فست اسکالپ طلا ({pend['setup_name']}) در پولبک FVG با ریسک ثابت 0.5% تایید شد."],
+        )
+
     def scan_for_opportunities(self):
         """اسکن واحد بازار و ارسال همزمان سیگنال به تمام اکانت‌های متصل و دارای ظرفیت با کنترل ریسک روزانه و افت سرمایه"""
         active_users = self.db.get_auto_trading_users()
@@ -523,6 +850,12 @@ class AresMasterSystem:
             )
 
             self.db.record_setup_evaluation(opportunity.to_dict())
+
+            if opportunity.status != "APPROVED" and symbol == "XAUUSD":
+                fs_opp = self._evaluate_gold_fast_scalp_opportunity(bundle, current_price)
+                if fs_opp is not None:
+                    opportunity = fs_opp
+                    self.db.record_setup_evaluation(opportunity.to_dict())
 
             if opportunity.status != "APPROVED":
                 continue

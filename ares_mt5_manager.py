@@ -575,6 +575,7 @@ Period=M15
             r_5m = tf_data.get("5m")
             r_4h = tf_data.get("4h")
             r_1d = tf_data.get("1d")
+            r_1m = tf_data.get("1m")
             if not (
                 isinstance(r_1h, list) and len(r_1h) >= 10
                 and isinstance(r_15m, list) and len(r_15m) >= 15
@@ -602,6 +603,7 @@ Period=M15
                 "5m": r_5m,
                 "4h": r_4h if isinstance(r_4h, list) else [],
                 "1d": r_1d if isinstance(r_1d, list) else [],
+                "1m": r_1m if isinstance(r_1m, list) else [],
             }
             updated_any = True
 

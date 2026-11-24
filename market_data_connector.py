@@ -94,7 +94,7 @@ class MT5ForexConnector:
 
         is_4h_resample = (timeframe == "4h")
         api_interval = "1h" if is_4h_resample else timeframe
-        range_map = {"5m": "5d", "15m": "5d", "1h": "1mo", "4h": "1mo", "1d": "3mo"}
+        range_map = {"1m": "2d", "5m": "5d", "15m": "5d", "1h": "1mo", "4h": "1mo", "1d": "3mo"}
         fetch_range = range_map.get(timeframe, "5d")
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{cloud_sym}?interval={api_interval}&range={fetch_range}"
@@ -233,8 +233,9 @@ class AresUnifiedDataService:
 
             df_h4 = self._rates_to_dataframe(sym_entry.get("4h"), min_len=8)
             df_d1 = self._rates_to_dataframe(sym_entry.get("1d"), min_len=4)
+            df_1m = self._rates_to_dataframe(sym_entry.get("1m"), min_len=20)
 
-            current_price = float(df_ltf.iloc[-1]["close"])
+            current_price = float(df_1m.iloc[-1]["close"]) if df_1m is not None else float(df_ltf.iloc[-1]["close"])
             if current_price <= 0.0:
                 return None
 
@@ -248,6 +249,7 @@ class AresUnifiedDataService:
                 "df_ltf": df_ltf,
                 "df_h4": df_h4,
                 "df_d1": df_d1,
+                "df_1m": df_1m,
                 "source": source_label,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -302,7 +304,8 @@ class AresUnifiedDataService:
 
         df_h4 = self.mt5.fetch_ohlcv(symbol, timeframe="4h", limit=30, min_len=8)
         df_d1 = self.mt5.fetch_ohlcv(symbol, timeframe="1d", limit=20, min_len=4)
-        current_price = float(df_ltf.iloc[-1]["close"])
+        df_1m = self.mt5.fetch_ohlcv(symbol, timeframe="1m", limit=65, min_len=20) if symbol == "XAUUSD" else None
+        current_price = float(df_1m.iloc[-1]["close"]) if df_1m is not None else float(df_ltf.iloc[-1]["close"])
 
         bundle = {
             "symbol": symbol,
@@ -313,6 +316,7 @@ class AresUnifiedDataService:
             "df_ltf": df_ltf,
             "df_h4": df_h4,
             "df_d1": df_d1,
+            "df_1m": df_1m,
             "source": "YAHOO_BACKUP",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }

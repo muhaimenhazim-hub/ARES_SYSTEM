@@ -1022,7 +1022,7 @@ string BuildRatesArrayJson(string sym, ENUM_TIMEFRAMES tf, int count)
 }
 
 //+------------------------------------------------------------------+
-//| خروجی کندل‌های لحظه‌ای هر ۱۵ ثانیه (5m/15m/1h/4h/1d)             |
+//| خروجی کندل‌های لحظه‌ای هر ۱۵ ثانیه (5m/15m/1h/4h/1d + 1m طلا)    |
 //+------------------------------------------------------------------+
 void ExportLiveCandlesFile()
 {
@@ -1076,12 +1076,13 @@ void ExportLiveCandlesFile()
 
       string h4Json  = BuildRatesArrayJson(bsym, PERIOD_H4, 30);
       string d1Json  = BuildRatesArrayJson(bsym, PERIOD_D1, 20);
+      string m1Json  = (canonicalSyms[i] == "XAUUSD") ? BuildRatesArrayJson(bsym, PERIOD_M1, 65) : "[]";
       string safeBsym = SanitizeJsonStr(bsym);
 
       if(added > 0) candlesJson += ",";
       candlesJson += "\"" + canonicalSyms[i] + "\":{\"broker_symbol\":\"" + safeBsym +
                      "\",\"1h\":" + h1Json + ",\"15m\":" + m15Json + ",\"5m\":" + m5Json +
-                     ",\"4h\":" + h4Json + ",\"1d\":" + d1Json + "}";
+                     ",\"4h\":" + h4Json + ",\"1d\":" + d1Json + ",\"1m\":" + m1Json + "}";
       added++;
    }
    candlesJson += "}";
