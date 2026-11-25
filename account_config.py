@@ -2,12 +2,14 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 CENTRAL ACCOUNT & BROKER CONFIGURATION
-VERSION: 14.7 (STRICT SPX/NDX/GOLD MATCHING AGAINST ETF FALSE POSITIVES)
+VERSION: 14.8 (ATOMIC SQLITE MT5 COMMAND QUEUE + ACK DELIVERY GUARANTEE)
 ================================================================================
 """
 
 import json
 import os
+import sqlite3
+import threading
 import time
 from typing import Dict, Any, Tuple, List, Optional
 
@@ -15,12 +17,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "ares_user_config.json")
 BRIDGE_CACHE_FILE = os.path.join(BASE_DIR, "ares_bridge_cache.json")
 COMMANDS_FILE = os.path.join(BASE_DIR, "ares_mt5_pending_commands.json")
+DB_FILE = os.path.join(BASE_DIR, "ares_trading.db")
 COMMAND_TTL_SECONDS = 600.0
+RESEND_COOLDOWN_SECONDS = 6.0
 BRIDGE_STALE_SECONDS = 45.0
 BINANCE_BALANCE_CACHE_TTL = 8.0
 
 BRIDGE_LIVE_DATA: Dict[str, Dict[str, Any]] = {}
 _BINANCE_BALANCE_CACHE: Dict[str, Tuple[float, Tuple[float, str, str, bool]]] = {}
+_QUEUE_INIT_LOCK = threading.Lock()
+_QUEUE_DB_READY = False
 
 # جدول نگاشت نمادهای استاندارد تحلیل تکنیکال به اسامی مرسوم در انواع بروکرهای متاتریدر
 BROKER_SYMBOL_ALIASES = {
@@ -93,28 +99,60 @@ def _save_json_file(file_path: str, data: Dict[str, Any]) -> None:
         pass
 
 
-def _prune_expired_commands(all_cmds: Dict[str, Any], ttl_seconds: float = COMMAND_TTL_SECONDS) -> Tuple[Dict[str, Any], bool]:
-    """پاکسازی خودکار دستورات منقضی‌شده و کلیدهای خالی جهت جلوگیری از قفل دائمی صف"""
-    now_ts = time.time()
-    modified = False
-    for key in list(all_cmds.keys()):
-        cmds = all_cmds.get(key)
-        if not isinstance(cmds, list) or not cmds:
-            del all_cmds[key]
-            modified = True
-            continue
-        fresh_cmds = [
-            c for c in cmds
-            if isinstance(c, dict) and (now_ts - float(c.get("created_ts", 0.0))) <= ttl_seconds
-        ]
-        if len(fresh_cmds) != len(cmds):
-            modified = True
-        if fresh_cmds:
-            all_cmds[key] = fresh_cmds
-        else:
-            del all_cmds[key]
-            modified = True
-    return all_cmds, modified
+def _ensure_queue_db() -> None:
+    global _QUEUE_DB_READY
+    if _QUEUE_DB_READY:
+        return
+    with _QUEUE_INIT_LOCK:
+        if _QUEUE_DB_READY:
+            return
+        conn = sqlite3.connect(DB_FILE, timeout=30.0, isolation_level=None)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            conn.execute("PRAGMA busy_timeout = 30000;")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS mt5_command_queue (
+                    cmd_id TEXT PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    broker_symbol TEXT DEFAULT '',
+                    payload_json TEXT NOT NULL,
+                    created_ts REAL NOT NULL,
+                    last_sent_ts REAL DEFAULT 0.0
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS mt5_command_keys (
+                    cmd_id TEXT NOT NULL,
+                    routing_key TEXT NOT NULL,
+                    PRIMARY KEY (cmd_id, routing_key)
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cmd_keys_key ON mt5_command_keys(routing_key);")
+            _QUEUE_DB_READY = True
+        finally:
+            conn.close()
+
+
+def _get_queue_conn() -> sqlite3.Connection:
+    _ensure_queue_db()
+    conn = sqlite3.connect(DB_FILE, timeout=30.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    return conn
+
+
+def _clean_symbol_key(sym: str) -> str:
+    return str(sym or "").replace(" ", "").replace(".", "").upper()
+
+
+def _prune_expired_queue_rows(cur: sqlite3.Cursor, now_ts: float, ttl_seconds: float = COMMAND_TTL_SECONDS) -> None:
+    cutoff = now_ts - ttl_seconds
+    cur.execute(
+        "DELETE FROM mt5_command_keys WHERE cmd_id IN (SELECT cmd_id FROM mt5_command_queue WHERE created_ts < ?);",
+        (cutoff,),
+    )
+    cur.execute("DELETE FROM mt5_command_queue WHERE created_ts < ?;", (cutoff,))
 
 
 def update_bridge_data(identifier: str, data: Dict[str, Any], extra_keys: Optional[List[str]] = None):
@@ -146,7 +184,7 @@ def update_bridge_data(identifier: str, data: Dict[str, Any], extra_keys: Option
 
 def clear_user_bridge_cache(keys: List[str]) -> None:
     """پاکسازی کامل کش زنده، فایل کش دیسک و صف دستورات معلق هنگام قطع ارتباط یا تغییر حساب"""
-    clean_keys = {str(k).strip().lower() for k in keys if k and str(k).strip()}
+    clean_keys = sorted({str(k).strip().lower() for k in keys if k and str(k).strip()})
     if not clean_keys:
         return
 
@@ -171,6 +209,23 @@ def clear_user_bridge_cache(keys: List[str]) -> None:
             cmds_modified = True
     if cmds_modified:
         _save_json_file(COMMANDS_FILE, all_cmds)
+
+    try:
+        conn = _get_queue_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.cursor()
+            ph = ",".join("?" for _ in clean_keys)
+            cur.execute(f"DELETE FROM mt5_command_keys WHERE routing_key IN ({ph});", clean_keys)
+            cur.execute("DELETE FROM mt5_command_queue WHERE cmd_id NOT IN (SELECT DISTINCT cmd_id FROM mt5_command_keys);")
+            conn.execute("COMMIT;")
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ [خطا در پاکسازی صف دیتابیس]: {e}", flush=True)
 
 
 def get_user_bridge_snapshot(user_cfg: Dict[str, Any], allow_stale: bool = False) -> Optional[Dict[str, Any]]:
@@ -262,84 +317,169 @@ def resolve_broker_symbol(canonical_symbol: str, user_cfg: Optional[Dict[str, An
 
 
 def get_user_pending_commands_count(target_keys: List[str]) -> int:
-    """شمارش سفارشات منتظر در صف برای جلوگیری از ارسال مازاد بر ۳ پوزیشن"""
-    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
-    if modified:
-        _save_json_file(COMMANDS_FILE, all_cmds)
-    unique_cmd_ids = set()
-    for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
-        for cmd in all_cmds.get(key, []):
-            if cmd.get("action") in ["BUY", "SELL"]:
-                cid = cmd.get("cmd_id", str(cmd))
-                unique_cmd_ids.add(cid)
-    return len(unique_cmd_ids)
+    """شمارش سفارشات منتظر در صف اتمیک دیتابیس برای جلوگیری از ارسال مازاد بر ۳ پوزیشن"""
+    clean_keys = sorted({k.strip().lower() for k in target_keys if k and str(k).strip()})
+    if not clean_keys:
+        return 0
+    now_ts = time.time()
+    try:
+        conn = _get_queue_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.cursor()
+            _prune_expired_queue_rows(cur, now_ts)
+            ph = ",".join("?" for _ in clean_keys)
+            cnt = cur.execute(
+                f"SELECT COUNT(DISTINCT q.cmd_id) FROM mt5_command_queue q "
+                f"JOIN mt5_command_keys k ON q.cmd_id = k.cmd_id "
+                f"WHERE q.action IN ('BUY', 'SELL') AND k.routing_key IN ({ph});",
+                clean_keys,
+            ).fetchone()[0]
+            conn.execute("COMMIT;")
+            return int(cnt)
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ [خطای شمارش صف MT5]: {e}", flush=True)
+        return 0
 
 
 def is_symbol_in_pending_queue(target_keys: List[str], symbol: str) -> bool:
-    """بررسی اینکه آیا سفارشی برای این نماد در صف منتظر اجرا است یا خیر"""
-    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
-    if modified:
-        _save_json_file(COMMANDS_FILE, all_cmds)
-    clean_target = symbol.replace(" ", "").replace(".", "").upper()
-    for key in set(k.strip().lower() for k in target_keys if k and str(k).strip()):
-        for cmd in all_cmds.get(key, []):
-            cmd_sym = str(cmd.get("symbol", cmd.get("broker_symbol", ""))).replace(" ", "").replace(".", "").upper()
-            if cmd_sym == clean_target and cmd.get("action") in ["BUY", "SELL"]:
-                return True
-    return False
+    """بررسی اینکه آیا سفارشی برای این نماد در صف اتمیک منتظر اجرا است یا خیر"""
+    clean_keys = sorted({k.strip().lower() for k in target_keys if k and str(k).strip()})
+    clean_target = _clean_symbol_key(symbol)
+    if not clean_keys or not clean_target:
+        return False
+    now_ts = time.time()
+    try:
+        conn = _get_queue_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.cursor()
+            _prune_expired_queue_rows(cur, now_ts)
+            ph = ",".join("?" for _ in clean_keys)
+            rows = cur.execute(
+                f"SELECT DISTINCT q.broker_symbol FROM mt5_command_queue q "
+                f"JOIN mt5_command_keys k ON q.cmd_id = k.cmd_id "
+                f"WHERE q.action IN ('BUY', 'SELL') AND k.routing_key IN ({ph});",
+                clean_keys,
+            ).fetchall()
+            conn.execute("COMMIT;")
+            return any(_clean_symbol_key(r[0]) == clean_target for r in rows)
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ [خطای بررسی نماد در صف MT5]: {e}", flush=True)
+        return False
 
 
 def queue_mt5_command(target_keys: List[str], command: Dict[str, Any], user_cfg: Optional[Dict[str, Any]] = None) -> bool:
     """
-    ثبت دستور معاملاتی با اعمال فیلتر سخت‌گیرانه ضدتکرار (Anti-Duplication) و سقف‌گذاری قطعی حداکثر ۳ سفارش در صف
+    ثبت اتمیک دستور معاملاتی در جدول صف SQLite با فیلتر سخت‌گیرانه ضدتکرار و سقف ۳ سفارش
     """
-    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
-    if modified:
-        _save_json_file(COMMANDS_FILE, all_cmds)
-
-    clean_keys = set(k.strip().lower() for k in target_keys if k and str(k).strip())
+    clean_keys = sorted({k.strip().lower() for k in target_keys if k and str(k).strip()})
     if not clean_keys:
         return False
 
-    action = command.get("action", "").upper()
+    action = str(command.get("action", "")).upper()
 
-    # تبدیل نماد تحلیل تکنیکال به نماد اجرایی بروکر
     if "symbol" in command:
         command["broker_symbol"] = resolve_broker_symbol(command["symbol"], user_cfg)
 
     target_sym = str(command.get("broker_symbol", command.get("symbol", ""))).strip().upper()
-
-    # ۱. فیلتر ضدتکرار و سقف ظرفیت برای سفارشات ورود (BUY / SELL)
-    if action in ["BUY", "SELL"]:
-        current_pending = get_user_pending_commands_count(list(clean_keys))
-        if current_pending >= 3:
-            print("🛑 [رد سفارش صف]: سقف ۳ سفارش همزمان در صف پر است.", flush=True)
-            return False
-
-        if is_symbol_in_pending_queue(list(clean_keys), target_sym):
-            print(f"🛑 [رد سفارش تکراری]: دستور معاملاتی برای نماد {target_sym} قبلاً در صف ثبت شده و منتظر اجراست.", flush=True)
-            return False
-
     now_ts = time.time()
-    cmd_id = f"cmd_{int(now_ts * 1000)}_{os.urandom(2).hex()}"
-    command["cmd_id"] = cmd_id
-    command["created_ts"] = now_ts
 
-    for key in clean_keys:
-        if key not in all_cmds:
-            all_cmds[key] = []
-        all_cmds[key].append(command)
+    try:
+        conn = _get_queue_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.cursor()
+            _prune_expired_queue_rows(cur, now_ts)
+            ph = ",".join("?" for _ in clean_keys)
 
-    _save_json_file(COMMANDS_FILE, all_cmds)
-    return True
+            if action in ("BUY", "SELL"):
+                rows = cur.execute(
+                    f"SELECT DISTINCT q.cmd_id, q.broker_symbol FROM mt5_command_queue q "
+                    f"JOIN mt5_command_keys k ON q.cmd_id = k.cmd_id "
+                    f"WHERE q.action IN ('BUY', 'SELL') AND k.routing_key IN ({ph});",
+                    clean_keys,
+                ).fetchall()
+                if len(rows) >= 3:
+                    conn.execute("COMMIT;")
+                    print("🛑 [رد سفارش صف]: سقف ۳ سفارش همزمان در صف پر است.", flush=True)
+                    return False
+
+                clean_target = _clean_symbol_key(target_sym)
+                if any(_clean_symbol_key(r[1]) == clean_target for r in rows):
+                    conn.execute("COMMIT;")
+                    print(f"🛑 [رد سفارش تکراری]: دستور معاملاتی برای نماد {target_sym} قبلاً در صف ثبت شده و منتظر اجراست.", flush=True)
+                    return False
+
+            cmd_id = f"cmd_{int(now_ts * 1000)}_{os.urandom(3).hex()}"
+            payload = dict(command)
+            payload["cmd_id"] = cmd_id
+            payload["created_ts"] = now_ts
+
+            cur.execute(
+                "INSERT INTO mt5_command_queue (cmd_id, action, broker_symbol, payload_json, created_ts, last_sent_ts) "
+                "VALUES (?, ?, ?, ?, ?, 0.0);",
+                (cmd_id, action, target_sym, json.dumps(payload, ensure_ascii=False), now_ts),
+            )
+            cur.executemany(
+                "INSERT INTO mt5_command_keys (cmd_id, routing_key) VALUES (?, ?);",
+                [(cmd_id, key) for key in clean_keys],
+            )
+            conn.execute("COMMIT;")
+            return True
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ [خطای ثبت دستور در صف MT5]: {e}", flush=True)
+        return False
+
+
+def ack_mt5_commands(cmd_ids: List[str]) -> int:
+    """حذف قطعی دستورات پس از دریافت تاییدیه تحویل (ACK) از متاتریدر"""
+    ids = sorted({str(x).strip() for x in (cmd_ids or []) if x and str(x).strip()})
+    if not ids:
+        return 0
+    try:
+        conn = _get_queue_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.cursor()
+            ph = ",".join("?" for _ in ids)
+            cur.execute(f"DELETE FROM mt5_command_keys WHERE cmd_id IN ({ph});", ids)
+            cur.execute(f"DELETE FROM mt5_command_queue WHERE cmd_id IN ({ph});", ids)
+            deleted = cur.rowcount
+            conn.execute("COMMIT;")
+            return int(deleted)
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ [خطای ثبت ACK صف MT5]: {e}", flush=True)
+        return 0
 
 
 def pop_pending_mt5_commands(
     identifier: str = "",
     login_str: str = "",
     extra_keys: Optional[List[str]] = None,
+    resend_cooldown: float = RESEND_COOLDOWN_SECONDS,
 ) -> List[Dict[str, Any]]:
-    """تحویل دستورات به متاتریدر و پاکسازی کامل از تمامی کلیدهای مرتبط با کاربر"""
+    """تحویل دستورات به متاتریدر بدون پاک کردن زودهنگام (تا زمان دریافت ACK یا انقضا)"""
     clean_id = str(identifier).strip().lower()
     clean_login = str(login_str).strip().lower()
 
@@ -349,34 +489,40 @@ def pop_pending_mt5_commands(
             cek = str(ek).strip().lower()
             if cek and cek not in keys_to_pop:
                 keys_to_pop.append(cek)
+    keys_to_pop = sorted(set(keys_to_pop))
+    if not keys_to_pop:
+        return []
 
-    all_cmds, modified = _prune_expired_commands(_load_json_file(COMMANDS_FILE))
-    collected: List[Dict[str, Any]] = []
-    seen_ids = set()
-
-    for key in keys_to_pop:
-        if key in all_cmds and all_cmds[key]:
-            for cmd in all_cmds[key]:
-                cid = cmd.get("cmd_id", str(cmd))
-                if cid not in seen_ids:
-                    seen_ids.add(cid)
-                    collected.append(cmd)
-            del all_cmds[key]
-            modified = True
-
-    if seen_ids:
-        for k in list(all_cmds.keys()):
-            remaining = [c for c in all_cmds[k] if c.get("cmd_id", str(c)) not in seen_ids]
-            if remaining:
-                all_cmds[k] = remaining
-            else:
-                del all_cmds[k]
-            modified = True
-
-    if modified:
-        _save_json_file(COMMANDS_FILE, all_cmds)
-
-    return collected
+    now_ts = time.time()
+    try:
+        conn = _get_queue_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cur = conn.cursor()
+            _prune_expired_queue_rows(cur, now_ts)
+            ph = ",".join("?" for _ in keys_to_pop)
+            rows = cur.execute(
+                f"SELECT DISTINCT q.cmd_id, q.payload_json FROM mt5_command_queue q "
+                f"JOIN mt5_command_keys k ON q.cmd_id = k.cmd_id "
+                f"WHERE k.routing_key IN ({ph}) "
+                f"AND (q.last_sent_ts = 0.0 OR (? - q.last_sent_ts) >= ?) "
+                f"ORDER BY q.created_ts ASC;",
+                keys_to_pop + [now_ts, float(resend_cooldown)],
+            ).fetchall()
+            if rows:
+                ids = [r[0] for r in rows]
+                iph = ",".join("?" for _ in ids)
+                cur.execute(f"UPDATE mt5_command_queue SET last_sent_ts = ? WHERE cmd_id IN ({iph});", [now_ts] + ids)
+            conn.execute("COMMIT;")
+            return [json.loads(r[1]) for r in rows]
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ [خطای خواندن صف MT5]: {e}", flush=True)
+        return []
 
 
 def fetch_user_live_balance(user_cfg: Dict[str, Any]) -> Tuple[float, str, str, bool]:

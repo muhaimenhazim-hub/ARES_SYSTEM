@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 12: MULTI-TENANT AUTOMATIC MT5 INSTANCE MANAGER (ares_mt5_manager.py)
-VERSION: 15.3 (UNLIMITED NUMERIC MT5, H4/D1 CANDLE BRIDGE & CALENDAR BRIDGE)
+VERSION: 15.4 (RELIABLE FILE BRIDGE DELIVERY, DEDUP & ERROR LOGGING)
 ================================================================================
 """
 
@@ -683,7 +683,8 @@ Period=M15
                 os.replace(out_file, reading_file)
                 with open(reading_file, "r", encoding="utf-8", errors="ignore") as f:
                     payload = json.load(f)
-            except Exception:
+            except Exception as e:
+                print(f"⚠️ [BRIDGE READ ERROR | {entry}]: {e}", flush=True)
                 continue
             finally:
                 if os.path.exists(reading_file):
@@ -699,7 +700,7 @@ Period=M15
                 continue
 
             try:
-                resp = requests.post(sync_url, json=payload, timeout=3.0)
+                resp = requests.post(sync_url, json=payload, timeout=8.0)
                 if resp.status_code == 200:
                     resp_data = resp.json()
                     new_orders = resp_data.get("orders", [])
@@ -707,20 +708,37 @@ Period=M15
                         in_file = os.path.join(files_dir, "ares_sync_in.json")
                         in_tmp = os.path.join(files_dir, "ares_sync_in.tmp")
                         merged_orders: List[Dict[str, Any]] = []
+                        seen_cmd_ids = set()
                         if os.path.exists(in_file):
                             try:
                                 with open(in_file, "r", encoding="utf-8") as f:
                                     prev = json.load(f)
                                     if isinstance(prev.get("orders"), list):
-                                        merged_orders.extend(prev["orders"])
-                            except Exception:
-                                pass
-                        merged_orders.extend(new_orders)
+                                        for po in prev["orders"]:
+                                            if isinstance(po, dict):
+                                                cid = str(po.get("cmd_id", ""))
+                                                if cid and cid in seen_cmd_ids:
+                                                    continue
+                                                if cid:
+                                                    seen_cmd_ids.add(cid)
+                                                merged_orders.append(po)
+                            except Exception as read_in_err:
+                                print(f"⚠️ [BRIDGE PREV IN READ ERROR | {entry}]: {read_in_err}", flush=True)
+                        for no in new_orders:
+                            if isinstance(no, dict):
+                                cid = str(no.get("cmd_id", ""))
+                                if cid and cid in seen_cmd_ids:
+                                    continue
+                                if cid:
+                                    seen_cmd_ids.add(cid)
+                                merged_orders.append(no)
                         with open(in_tmp, "w", encoding="utf-8") as f:
                             json.dump({"status": "SYNCED", "orders": merged_orders}, f, ensure_ascii=False, separators=(",", ":"))
                         os.replace(in_tmp, in_file)
-            except Exception:
-                pass
+                else:
+                    print(f"⚠️ [BRIDGE HTTP STATUS | {entry}]: HTTP {resp.status_code}", flush=True)
+            except Exception as e:
+                print(f"⚠️ [BRIDGE DELIVER ERROR | {entry}]: {e}", flush=True)
 
     def run_file_bridge_loop(self):
         while True:
@@ -780,7 +798,7 @@ Period=M15
 
     def run_supervisor(self, poll_interval_seconds: int = 10):
         print("=" * 80, flush=True)
-        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.3 - نامحدود، پل کندل H4/D1 و پل تقویم اقتصادی) فعال شد.", flush=True)
+        print("🌟 ناظر هوشمند ابری متاتریدرها (ARES V15.4 - پل تحویل مطمئن و بدون تداخل) فعال شد.", flush=True)
         print("=" * 80, flush=True)
 
         bridge_thread = threading.Thread(target=self.run_file_bridge_loop, daemon=True)

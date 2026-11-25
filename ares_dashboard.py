@@ -2,7 +2,7 @@
 ================================================================================
 ARES AI TRADING SYSTEM
 PHASE 11: MULTI-TENANT WEB DASHBOARD WITH USER AUTH & PER-USER ISOLATION
-VERSION: 15.1 (FIX HTTP COPY BUTTON & LOGOUT ALWAYS TO LOGIN)
+VERSION: 15.2 (ACK-BASED BRIDGE SYNC & ERROR LOGGING)
 ================================================================================
 """
 
@@ -891,6 +891,10 @@ async def bridge_sync_api(request: Request):
         if login_str in ("", "0"):
             return {"status": "NOT_LOGGED_IN", "orders": []}
 
+        acked_cmds = data.get("acked_cmds", [])
+        if isinstance(acked_cmds, list) and acked_cmds:
+            account_config.ack_mt5_commands(acked_cmds)
+
         matched_user = db.get_user_by_identifier_or_login(identifier, login_str)
         extra_keys: List[str] = []
         if matched_user:
@@ -905,14 +909,15 @@ async def bridge_sync_api(request: Request):
         if matched_user and "open_positions" in data and isinstance(data["open_positions"], list):
             try:
                 db.sync_mt5_live_positions(matched_user["user_id"], data["open_positions"])
-            except Exception:
-                pass
+            except Exception as sync_err:
+                print(f"⚠️ [DB SYNC POSITIONS ERROR | {login_str}]: {sync_err}", flush=True)
 
         pending_orders = account_config.pop_pending_mt5_commands(
             identifier=identifier, login_str=login_str, extra_keys=extra_keys
         )
         return {"status": "SYNCED", "orders": pending_orders}
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ [BRIDGE SYNC API ERROR]: {e}", flush=True)
         return {"status": "SYNCED", "orders": []}
 
 

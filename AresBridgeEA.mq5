@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                 AresBridgeEA.mq5 |
-//|                            ARES AI TRADING SYSTEM - BRIDGE V15.1 |
-//|  1.0R 30%+BE(SPREAD/COMM/SWAP), 1.5R 30%+0.5R, 2.0R 40% & 2s EA  |
+//|                            ARES AI TRADING SYSTEM - BRIDGE V15.2 |
+//|  1.0R 30%+BE(SPREAD/COMM/SWAP), 1.5R 30%+0.5R, 2.0R 40% & ACK EA |
 //+------------------------------------------------------------------+
 #property copyright "ARES AI TRADING SYSTEM"
-#property version   "15.10"
+#property version   "15.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -18,14 +18,60 @@ input double InpMaxLotCap        = 10.0;  // سقف ایمنی حجم هر مع�
 
 CTrade ExtTrade;
 
+string   g_procCmdIds[32];
+datetime g_procCmdTimes[32];
+int      g_procCmdHead = 0;
+
+//+------------------------------------------------------------------+
+//| جلوگیری از اجرای تکراری دستور و ساخت لیست تاییدیه تحویل (ACK)   |
+//+------------------------------------------------------------------+
+bool IsCmdAlreadyProcessed(string cmdId)
+{
+   if(StringLen(cmdId) == 0) return false;
+   for(int i = 0; i < 32; i++)
+   {
+      if(StringLen(g_procCmdIds[i]) > 0 && g_procCmdIds[i] == cmdId)
+         return true;
+   }
+   return false;
+}
+
+void MarkCmdProcessed(string cmdId)
+{
+   if(StringLen(cmdId) == 0) return;
+   if(IsCmdAlreadyProcessed(cmdId)) return;
+   g_procCmdIds[g_procCmdHead] = cmdId;
+   g_procCmdTimes[g_procCmdHead] = TimeLocal();
+   g_procCmdHead = (g_procCmdHead + 1) % 32;
+}
+
+string BuildAckedCmdsJson()
+{
+   datetime now = TimeLocal();
+   string json = "[";
+   int added = 0;
+   for(int i = 0; i < 32; i++)
+   {
+      if(StringLen(g_procCmdIds[i]) > 0 && (now - g_procCmdTimes[i]) <= 120)
+      {
+         if(added > 0) json += ",";
+         json += "\"" + SanitizeJsonStr(g_procCmdIds[i]) + "\"";
+         added++;
+      }
+   }
+   json += "]";
+   return json;
+}
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   ArrayInitialize(g_procCmdTimes, 0);
    EventSetTimer(InpSyncSeconds);
    ExtTrade.SetDeviationInPoints(InpSlippagePoints);
-   Print("🚀 ARES Bridge V15.1 Initialized (1.0R 30%+BE, 1.5R 30%+0.5R, 2.0R 40%, 2s Quotes & M1 ON).");
+   Print("🚀 ARES Bridge V15.2 Initialized (1.0R 30%+BE, 1.5R 30%+0.5R, 2.0R 40%, ACK+Dedup ON).");
    ManagePositionsAndStagedExits();
    SyncAccountWithServer();
    ExportLiveCandlesFile();
@@ -733,6 +779,14 @@ void ProcessServerOrders(string response)
 //+------------------------------------------------------------------+
 void ExecuteSingleOrderJson(string orderObj)
 {
+   string cmdId        = ExtractJsonVal(orderObj, "cmd_id");
+   if(StringLen(cmdId) > 0 && IsCmdAlreadyProcessed(cmdId))
+   {
+      Print("ℹ️ [ARES DEDUP]: دستور تکراری نادیده گرفته شد: ", cmdId);
+      return;
+   }
+   MarkCmdProcessed(cmdId);
+
    string action       = ExtractJsonVal(orderObj, "action");
    string rawSymbol    = ExtractJsonVal(orderObj, "symbol");
    double volume       = StringToDouble(ExtractJsonVal(orderObj, "volume"));
@@ -1267,32 +1321,38 @@ void SyncViaLocalFileBridge(const char &postData[])
       }
    }
 
-   if(FileIsExist("ares_sync_in.json", 0))
+   if(!FileIsExist("ares_sync_proc.json", 0) && FileIsExist("ares_sync_in.json", 0))
    {
-      if(FileMove("ares_sync_in.json", 0, "ares_sync_proc.json", FILE_REWRITE))
+      FileMove("ares_sync_in.json", 0, "ares_sync_proc.json", FILE_REWRITE);
+   }
+
+   if(FileIsExist("ares_sync_proc.json", 0))
+   {
+      int hIn = FileOpen("ares_sync_proc.json", FILE_READ | FILE_BIN);
+      if(hIn != INVALID_HANDLE)
       {
-         int hIn = FileOpen("ares_sync_proc.json", FILE_READ | FILE_BIN);
-         if(hIn != INVALID_HANDLE)
+         int sz = (int)FileSize(hIn);
+         if(sz > 0)
          {
-            int sz = (int)FileSize(hIn);
-            if(sz > 0)
+            uchar buf[];
+            ArrayResize(buf, sz);
+            uint readBytes = FileReadArray(hIn, buf, 0, sz);
+            FileClose(hIn);
+            if(readBytes > 0)
             {
-               uchar buf[];
-               ArrayResize(buf, sz);
-               uint readBytes = FileReadArray(hIn, buf, 0, sz);
-               FileClose(hIn);
-               if(readBytes > 0)
-               {
-                  string resp = CharArrayToString(buf, 0, (int)readBytes, CP_UTF8);
-                  ProcessServerOrders(resp);
-               }
-            }
-            else
-            {
-               FileClose(hIn);
+               string resp = CharArrayToString(buf, 0, (int)readBytes, CP_UTF8);
+               ProcessServerOrders(resp);
             }
          }
+         else
+         {
+            FileClose(hIn);
+         }
          FileDelete("ares_sync_proc.json", 0);
+      }
+      else
+      {
+         Print("⚠️ [ARES FILE BRIDGE]: FileOpen failed on ares_sync_proc.json (will retry), err=", GetLastError());
       }
    }
 }
@@ -1374,13 +1434,14 @@ void SyncAccountWithServer()
    string openPosJson    = BuildOpenPositionsJson(floatingPnL);
    string activeSymsJson = BuildActiveSymbolsJson();
    string liveQuotesJson = BuildLiveQuotesJson();
+   string ackedCmdsJson  = BuildAckedCmdsJson();
 
    string ident = (InpUserIdentifier != "") ? InpUserIdentifier : IntegerToString(login);
 
    string payload = StringFormat(
       "{\"identifier\":\"%s\",\"login\":%I64d,\"balance\":%.2f,\"equity\":%.2f,\"history_pnl\":%.2f,\"floating_pnl\":%.2f,\"initial_deposit\":%.2f,\"broker\":\"%s\",\"server\":\"%s\",\"verified_symbols\":true,\"open_positions\":%s,\"active_symbols\":%s",
       ident, login, balance, equity, historyPnL, floatingPnL, initialDeposit, company, server, openPosJson, activeSymsJson
-   ) + ",\"live_quotes\":" + liveQuotesJson + "}";
+   ) + ",\"live_quotes\":" + liveQuotesJson + ",\"acked_cmds\":" + ackedCmdsJson + "}";
 
    char postData[];
    int len = StringToCharArray(payload, postData, 0, WHOLE_ARRAY, CP_UTF8);
